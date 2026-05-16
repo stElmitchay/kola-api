@@ -1,0 +1,210 @@
+//@ts-check
+
+import BigNumber from 'bignumber.js';
+import { validatePhoneNumber } from '../../utils/validation.js';
+import { deriveWalletFromPhone } from '../../utils/solana.js';
+import { createCheckoutSession, createPaymentCode } from '../../utils/monime.js';
+import {
+  createDeposit as createDepositRepo,
+  getDeposit as getDepositRepo,
+  listDeposits as listDepositsRepo,
+  updateDeposit
+} from '../../repos/deposits.js';
+import { getActiveRate } from '../../repos/exchange-rates.js';
+import { getWalletByPhone, createWallet } from '../../repos/wallets.js';
+import {
+  createValidationError,
+  createNotFoundError,
+  createDatabaseError
+} from '../../utils/errors.js';
+
+/**
+ * Calculate USDC amount from SLE amount and exchange rate
+ * USDC has 6 decimal places, so 1 USDC = 1_000_000 minor units
+ * @param {number} amountSleMinor - SLE amount in minor units (cents)
+ * @param {number} rate - SLE per 1 USDC (e.g., 25 means 25 SLE = 1 USDC)
+ */
+function calculateUsdcAmount(amountSleMinor, rate) {
+  const sleAmount = new BigNumber(amountSleMinor).dividedBy(100);
+  const usdcAmount = sleAmount.dividedBy(rate);
+  const usdcMinorUnits = usdcAmount.multipliedBy(1_000_000).integerValue(BigNumber.ROUND_DOWN);
+  return usdcMinorUnits.toNumber();
+}
+
+/**
+ * Resolve wallet address — use provided or derive from phone number
+ * @param {string | undefined} walletAddress
+ * @param {string} phoneNumber
+ * @param {string} application
+ * @returns {Promise<{ address: string, type: 'provided' | 'derived' }>}
+ */
+async function resolveWalletAddress(walletAddress, phoneNumber, application) {
+  if (walletAddress) {
+    return { address: walletAddress, type: 'provided' };
+  }
+
+  const { data: existing } = await getWalletByPhone(phoneNumber, application);
+  if (existing) {
+    return { address: existing.wallet_address, type: 'derived' };
+  }
+
+  const { address } = await deriveWalletFromPhone(phoneNumber);
+
+  await createWallet({
+    phone_number: phoneNumber,
+    wallet_address: address,
+    application
+  });
+
+  return { address, type: 'derived' };
+}
+
+/**
+ * Create a new deposit — initiates the mobile money → USDC flow
+ * @param {object} params
+ * @param {number} params.amount
+ * @param {string} params.currency
+ * @param {string} params.paymentMethod
+ * @param {string} params.phoneNumber
+ * @param {string} [params.walletAddress]
+ * @param {string} [params.successUrl]
+ * @param {string} [params.cancelUrl]
+ * @param {object} [params.metadata]
+ * @param {string} params.application
+ */
+export async function initiateDeposit(params) {
+  const { valid, normalized } = validatePhoneNumber(params.phoneNumber);
+  if (!valid || !normalized) {
+    throw createValidationError('Invalid Sierra Leone phone number');
+  }
+
+  const { data: rateData, error: rateError } = await getActiveRate(params.application);
+  if (rateError || !rateData) {
+    throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
+  }
+
+  const rate = Number(rateData.rate);
+  const amountUsdc = calculateUsdcAmount(params.amount, rate);
+
+  if (amountUsdc <= 0) {
+    throw createValidationError('Amount too small to convert to USDC');
+  }
+
+  const wallet = await resolveWalletAddress(
+    params.walletAddress,
+    normalized,
+    params.application
+  );
+
+  const { data: deposit, error: depositError } = await createDepositRepo({
+    application: params.application,
+    phone_number: normalized,
+    wallet_address: wallet.address,
+    wallet_type: wallet.type,
+    amount_sle: params.amount,
+    amount_usdc: amountUsdc,
+    exchange_rate: rate,
+    payment_method: params.paymentMethod,
+    metadata: params.metadata || {}
+  });
+
+  if (depositError || !deposit) {
+    throw createDatabaseError(`Failed to create deposit: ${depositError?.message}`);
+  }
+
+  let paymentDetails;
+
+  if (params.paymentMethod === 'checkout') {
+    const session = await createCheckoutSession({
+      depositId: deposit.id,
+      amountMinorUnits: params.amount,
+      successUrl: params.successUrl,
+      cancelUrl: params.cancelUrl,
+      metadata: { deposit_id: deposit.id }
+    });
+
+    paymentDetails = {
+      redirectUrl: session.redirectUrl,
+      expiresAt: session.expireTime
+    };
+
+    await updateDepositMonimeRef(deposit.id, session.id);
+  } else {
+    const paymentCode = await createPaymentCode({
+      depositId: deposit.id,
+      amountMinorUnits: params.amount,
+      phoneNumber: normalized,
+      metadata: { deposit_id: deposit.id }
+    });
+
+    paymentDetails = {
+      ussdCode: paymentCode.ussdCode,
+      expiresAt: paymentCode.expireTime
+    };
+
+    await updateDepositMonimeRef(deposit.id, paymentCode.id);
+  }
+
+  return {
+    id: deposit.id,
+    status: deposit.status,
+    amountSle: deposit.amount_sle,
+    amountUsdc: deposit.amount_usdc,
+    exchangeRate: deposit.exchange_rate,
+    walletAddress: deposit.wallet_address,
+    walletType: deposit.wallet_type,
+    paymentMethod: deposit.payment_method,
+    ...paymentDetails
+  };
+}
+
+/**
+ * @param {string} depositId
+ * @param {string} monimeResourceId
+ */
+async function updateDepositMonimeRef(depositId, monimeResourceId) {
+  await updateDeposit(depositId, { monime_resource_id: monimeResourceId });
+}
+
+/**
+ * Get deposit status
+ * @param {string} id
+ * @param {string} application
+ */
+export async function getDepositStatus(id, application) {
+  const { data, error } = await getDepositRepo(id, application);
+
+  if (error || !data) {
+    throw createNotFoundError('Deposit not found');
+  }
+
+  return {
+    id: data.id,
+    status: data.status,
+    amountSle: data.amount_sle,
+    amountUsdc: data.amount_usdc,
+    exchangeRate: data.exchange_rate,
+    walletAddress: data.wallet_address,
+    walletType: data.wallet_type,
+    paymentMethod: data.payment_method,
+    solanaTxSignature: data.solana_tx_signature,
+    failureReason: data.failure_reason,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at
+  };
+}
+
+/**
+ * List deposits for an application
+ * @param {string} application
+ * @param {object} filters
+ */
+export async function getDeposits(application, filters) {
+  const { data, error } = await listDepositsRepo(application, filters);
+
+  if (error) {
+    throw createDatabaseError(`Failed to list deposits: ${error.message}`);
+  }
+
+  return data;
+}
