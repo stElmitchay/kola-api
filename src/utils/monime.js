@@ -153,15 +153,31 @@ export async function getProviders() {
 }
 
 /**
- * Verify Monime webhook signature (HMAC-SHA256)
+ * Verify Monime webhook signature (Stripe-style: t=timestamp,v1=base64_hmac)
+ * The HMAC is computed over "${timestamp}.${rawBody}" and base64-encoded.
  * @param {string} rawBody - Raw request body string
- * @param {string} signature - Value from Monime-Signature header
+ * @param {string} signatureHeader - Value from Monime-Signature header
  * @returns {boolean}
  */
-export function verifyWebhookSignature(rawBody, signature) {
+export function verifyWebhookSignature(rawBody, signatureHeader) {
   const secret = process.env.MONIME_WEBHOOK_SECRET;
+
+  // Parse "t=1234567890,v1=base64hash"
+  const parts = {};
+  for (const part of signatureHeader.split(',')) {
+    const [key, ...rest] = part.split('=');
+    parts[key] = rest.join('=');
+  }
+
+  const timestamp = parts['t'];
+  const receivedSig = parts['v1'];
+
+  if (!timestamp || !receivedSig) return false;
+
+  const signedPayload = `${timestamp}.${rawBody}`;
   const computed = createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
-  return computed === signature;
+    .update(signedPayload)
+    .digest('base64');
+
+  return computed === receivedSig;
 }
