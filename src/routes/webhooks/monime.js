@@ -41,7 +41,8 @@ app.post('/', async (c) => {
 
   const successEvents = [
     'checkout_session.completed',
-    'payment_code.completed'
+    'payment_code.completed',
+    'payment_code.processed'
   ];
 
   const expiryEvents = [
