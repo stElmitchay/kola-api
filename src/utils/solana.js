@@ -42,6 +42,14 @@ function getUsdcMint() {
 }
 
 /**
+ * Public treasury wallet address (base58).
+ * @returns {string}
+ */
+export function getTreasuryAddress() {
+  return getTreasuryKeypair().publicKey.toBase58();
+}
+
+/**
  * Derive a deterministic wallet address from a phone number
  * Uses the treasury public key as the base and phone number as the seed
  * @param {string} phoneNumber - Normalized phone number (e.g., +23276123456)
@@ -130,6 +138,66 @@ export async function transferUsdc(destinationAddress, amountMinorUnits) {
     return signature;
   } catch (error) {
     throw createOnChainError(`USDC transfer failed: ${error.message}`);
+  }
+}
+
+/**
+ * Verify an inbound USDC transfer to the treasury.
+ * Checks: tx is finalized, the source wallet matches, the destination is the
+ * treasury USDC ATA, and the amount equals expectedAmount.
+ *
+ * @param {string} txSignature - Solana transaction signature (base58)
+ * @param {string} expectedFromWallet - Sender wallet base58 (the user)
+ * @param {number} expectedAmount - Expected USDC amount in minor units
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function verifyIncomingUsdcTransfer(txSignature, expectedFromWallet, expectedAmount) {
+  try {
+    const connection = getConnection();
+    const treasury = getTreasuryKeypair();
+    const usdcMint = getUsdcMint();
+
+    const treasuryAta = (await getAssociatedTokenAddress(usdcMint, treasury.publicKey)).toBase58();
+    const senderAta = (await getAssociatedTokenAddress(usdcMint, new PublicKey(expectedFromWallet))).toBase58();
+
+    const tx = await connection.getParsedTransaction(txSignature, {
+      maxSupportedTransactionVersion: 0,
+      commitment: 'finalized'
+    });
+    if (!tx) {
+      return { ok: false, reason: 'Transaction not found or not yet finalized' };
+    }
+    if (tx.meta?.err) {
+      return { ok: false, reason: `On-chain error: ${JSON.stringify(tx.meta.err)}` };
+    }
+
+    // Walk all instructions (top-level + inner) for an SPL transfer that
+    // moves the expected amount from senderAta to treasuryAta.
+    const allIxs = [
+      ...(tx.transaction.message.instructions || []),
+      ...((tx.meta?.innerInstructions || []).flatMap(g => g.instructions))
+    ];
+
+    for (const ix of allIxs) {
+      //@ts-ignore — parsed instructions have these fields at runtime
+      const parsed = ix.parsed;
+      if (!parsed || parsed.type !== 'transfer' && parsed.type !== 'transferChecked') continue;
+
+      const info = parsed.info || {};
+      const source = info.source;
+      const destination = info.destination;
+      // `transfer` carries amount as string; `transferChecked` carries tokenAmount.amount
+      const amountStr = info.amount ?? info.tokenAmount?.amount;
+      if (!amountStr || !source || !destination) continue;
+
+      if (source === senderAta && destination === treasuryAta && Number(amountStr) === expectedAmount) {
+        return { ok: true };
+      }
+    }
+
+    return { ok: false, reason: 'No matching USDC transfer instruction found in this transaction' };
+  } catch (error) {
+    return { ok: false, reason: `Verification failed: ${error.message}` };
   }
 }
 

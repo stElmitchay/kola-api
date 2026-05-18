@@ -8,6 +8,7 @@ import publicEndpoints from '../src/routes/public/index.js';
 import admin from '../src/routes/admin/index.js';
 import wallets from '../src/routes/wallets/index.js';
 import deposits from '../src/routes/deposits/index.js';
+import withdrawals from '../src/routes/withdrawals/index.js';
 import monimeWebhook from '../src/routes/webhooks/monime.js';
 
 const app = new Hono().basePath('/api');
@@ -33,6 +34,9 @@ app.route('/v1/wallets', wallets);
 
 // Deposit routes (API key auth)
 app.route('/v1/deposits', deposits);
+
+// Withdrawal routes (API key auth)
+app.route('/v1/withdrawals', withdrawals);
 
 // Webhook routes (signature verified)
 app.route('/webhooks/monime', monimeWebhook);

@@ -144,6 +144,50 @@ export async function getPaymentCode(id) {
 }
 
 /**
+ * Create a payout to a Mobile Money wallet.
+ * @param {object} params
+ * @param {string} params.withdrawalId - Our withdrawal ID (used as reference + idempotency key)
+ * @param {number} params.amountMinorUnits - SLE amount in minor units (1 SLE = 100)
+ * @param {string} params.phoneNumber - Destination MoMo phone (e.g. "+23279688339")
+ * @param {string} params.providerCode - Monime momo provider code (e.g. "m17" for Orange)
+ * @param {object} [params.metadata]
+ * @returns {Promise<{ id: string, status: string }>}
+ */
+export async function createPayout(params) {
+  const response = await monimeRequest(
+    'POST',
+    '/v1/payouts',
+    {
+      amount: { currency: 'SLE', value: params.amountMinorUnits },
+      source: { financialAccountId: process.env.MONIME_FINANCIAL_ACCOUNT_ID },
+      destination: {
+        type: 'momo',
+        accountId: params.phoneNumber,
+        providerCode: params.providerCode
+      },
+      reference: params.withdrawalId,
+      metadata: params.metadata || {}
+    },
+    params.withdrawalId
+  );
+
+  return {
+    id: response.result.id,
+    status: response.result.status
+  };
+}
+
+/**
+ * Get a payout by ID
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export async function getPayout(id) {
+  const response = await monimeRequest('GET', `/v1/payouts/${id}`);
+  return response.result;
+}
+
+/**
  * List mobile money providers for Sierra Leone
  * @returns {Promise<any[]>}
  */

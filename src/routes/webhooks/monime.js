@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { verifyWebhookSignature } from '../../utils/monime.js';
 import { transferUsdc } from '../../utils/solana.js';
 import { getDepositById, updateDeposit } from '../../repos/deposits.js';
+import { getWithdrawalById, updateWithdrawal } from '../../repos/withdrawals.js';
 
 const app = new Hono();
 
@@ -17,7 +18,7 @@ app.post('/', async (c) => {
   }
 
   const payload = JSON.parse(rawBody);
-  const eventName = payload.event?.name;
+  const eventName = payload.event?.name || '';
   const reference = payload.data?.reference;
 
   console.log(`[Webhook] Received event: ${eventName}, reference: ${reference}`);
@@ -27,6 +28,25 @@ app.post('/', async (c) => {
     return c.json({ received: true });
   }
 
+  // Route by event resource type
+  if (eventName.startsWith('payment_code.') || eventName.startsWith('checkout_session.')) {
+    return handleDepositEvent(c, eventName, reference);
+  }
+
+  if (eventName.startsWith('payout.')) {
+    return handlePayoutEvent(c, eventName, reference, payload.data);
+  }
+
+  console.log(`[Webhook] Ignoring unhandled event type: ${eventName}`);
+  return c.json({ received: true });
+});
+
+/**
+ * @param {any} c
+ * @param {string} eventName
+ * @param {string} reference
+ */
+async function handleDepositEvent(c, eventName, reference) {
   const { data: deposit, error } = await getDepositById(reference);
 
   if (error || !deposit) {
@@ -52,20 +72,57 @@ app.post('/', async (c) => {
   ];
 
   if (successEvents.includes(eventName)) {
-    await handlePaymentSuccess(deposit);
+    await handleDepositSuccess(deposit);
   } else if (expiryEvents.includes(eventName)) {
     await updateDeposit(deposit.id, { status: 'expired' });
     console.log(`[Webhook] Deposit ${deposit.id} marked as expired`);
   }
 
   return c.json({ received: true });
-});
+}
 
 /**
- * Handle a successful payment — transfer USDC to the user's wallet
+ * @param {any} c
+ * @param {string} eventName
+ * @param {string} reference
+ * @param {any} data
+ */
+async function handlePayoutEvent(c, eventName, reference, data) {
+  const { data: withdrawal, error } = await getWithdrawalById(reference);
+
+  if (error || !withdrawal) {
+    console.error(`[Webhook] Withdrawal not found for reference: ${reference}`);
+    return c.json({ received: true });
+  }
+
+  if (['completed', 'failed', 'expired'].includes(withdrawal.status)) {
+    console.log(`[Webhook] Withdrawal ${withdrawal.id} already ${withdrawal.status}, skipping`);
+    return c.json({ received: true });
+  }
+
+  if (eventName === 'payout.completed') {
+    await updateWithdrawal(withdrawal.id, { status: 'completed' });
+    console.log(`[Webhook] Withdrawal ${withdrawal.id} completed`);
+  } else if (eventName === 'payout.failed') {
+    const reason = data?.failureDetail?.message || data?.failureDetail?.code || 'Monime payout failed';
+    await updateWithdrawal(withdrawal.id, {
+      status: 'failed',
+      failure_reason: reason
+    });
+    console.log(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
+  } else if (eventName === 'payout.delayed') {
+    // Informational; keep current status
+    console.log(`[Webhook] Withdrawal ${withdrawal.id} delayed (still processing)`);
+  }
+
+  return c.json({ received: true });
+}
+
+/**
+ * Handle a successful deposit — transfer USDC to the user's wallet
  * @param {object} deposit
  */
-async function handlePaymentSuccess(deposit) {
+async function handleDepositSuccess(deposit) {
   try {
     await updateDeposit(deposit.id, { status: 'confirmed' });
     console.log(`[Webhook] Deposit ${deposit.id} confirmed, initiating USDC transfer`);
