@@ -6,6 +6,7 @@ import { errorHandler } from '../../middleware/error-handler.js';
 import { createApiKey, listApiKeys, deactivateApiKey } from './api-keys.js';
 import { setExchangeRate, getExchangeRates } from './exchange-rates.js';
 import { setExchangeRateSchema } from '../../schemas/exchange-rate.js';
+import { listDeposits } from '../../repos/deposits.js';
 
 const app = new Hono();
 
@@ -71,6 +72,32 @@ app.get('/exchange-rates', async (c) => {
 
   const rates = await getExchangeRates(applicationId);
   return c.json(rates);
+});
+
+// --- Deposits ---
+
+app.get('/deposits', async (c) => {
+  const applicationId = c.req.header('X-Application-Id');
+  if (!applicationId) {
+    return c.json({ error: 'X-Application-Id header is required' }, 400);
+  }
+
+  const filters = {};
+  const status = c.req.query('status');
+  const limit = c.req.query('limit');
+  const offset = c.req.query('offset');
+
+  if (status) filters.status = status;
+  if (limit) filters.limit = parseInt(limit, 10);
+  if (offset) filters.offset = parseInt(offset, 10);
+
+  const { data, error } = await listDeposits(applicationId, filters);
+
+  if (error) {
+    return c.json({ error: error.message }, 500);
+  }
+
+  return c.json(data);
 });
 
 export default app;

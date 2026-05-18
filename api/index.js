@@ -40,7 +40,7 @@ app.route('/webhooks/monime', monimeWebhook);
 // Global fallback error handler
 app.onError((err, c) => {
   console.error(`[Global Error] ${err.message}`);
-  return c.json({ success: false, message: 'Internal server error' }, 500);
+  return c.json({ success: false, message: err.message }, 500);
 });
 
 app.notFound((c) => {

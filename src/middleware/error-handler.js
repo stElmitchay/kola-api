@@ -16,7 +16,7 @@ export function errorHandler(err, c) {
   };
 
   const status = statusMap[err.name] || 500;
-  const message = status === 500 ? 'Internal server error' : err.message;
+  const message = err.message;
 
   console.error(`[${err.name}] ${err.message}`);
 
