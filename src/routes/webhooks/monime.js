@@ -34,6 +34,9 @@ app.post('/', async (c) => {
         bodyLast40: rawBody.substring(rawBody.length - 40),
         signatureHeader: signature || 'missing',
         secretPrefix: secret.substring(0, 6),
+        secretSuffix: secret.substring(secret.length - 6),
+        secretLength: secret.length,
+        secretCharCodes: JSON.stringify([...secret].slice(-5).map(c => c.charCodeAt(0))),
         computedSig: computed,
         receivedSig: parts['v1'] || 'missing'
       }
