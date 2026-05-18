@@ -154,6 +154,7 @@ export async function getProviders() {
 
 /**
  * Verify Monime webhook signature (Stripe-style: t=timestamp,v1=base64_hmac)
+ * HMAC-SHA256 is computed over "${timestamp}.${rawBody}" using the webhook secret, base64-encoded.
  * @param {string} rawBody - Raw request body string
  * @param {string} signatureHeader - Value from Monime-Signature header
  * @returns {boolean}
@@ -173,33 +174,9 @@ export function verifyWebhookSignature(rawBody, signatureHeader) {
 
   if (!timestamp || !receivedSig) return false;
 
-  // Log raw body info to verify it's not being mangled
-  console.log(`[Webhook Debug] body length=${rawBody.length}, first100=${rawBody.substring(0, 100)}`);
-  console.log(`[Webhook Debug] timestamp=${timestamp}, receivedSig=${receivedSig}`);
+  const computed = createHmac('sha256', secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest('base64');
 
-  // Approach 1: HMAC(secret_string, "timestamp.body") → base64  (Stripe-style)
-  const a1 = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('base64');
-
-  // Approach 2: HMAC(base64_decode(secret), "timestamp.body") → base64
-  const decodedSecret = Buffer.from(secret, 'base64');
-  const a2 = createHmac('sha256', decodedSecret).update(`${timestamp}.${rawBody}`).digest('base64');
-
-  // Approach 3: HMAC(secret_string, body) → base64
-  const a3 = createHmac('sha256', secret).update(rawBody).digest('base64');
-
-  // Approach 4: HMAC(base64_decode(secret), body) → base64
-  const a4 = createHmac('sha256', decodedSecret).update(rawBody).digest('base64');
-
-  // Approach 5: HMAC(secret_string, "timestamp.body") → hex
-  const a5 = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest('hex');
-
-  // Approach 6: HMAC(base64_decode(secret), "timestamp.body") → hex
-  const a6 = createHmac('sha256', decodedSecret).update(`${timestamp}.${rawBody}`).digest('hex');
-
-  console.log(`[Webhook Debug] a1=${a1} a2=${a2} a3=${a3} a4=${a4} a5=${a5} a6=${a6}`);
-
-  const match = [a1, a2, a3, a4, a5, a6].findIndex(a => a === receivedSig);
-  console.log(`[Webhook Debug] match index=${match} (-1 means none matched)`);
-
-  return match !== -1;
+  return computed === receivedSig;
 }
