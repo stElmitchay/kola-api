@@ -11,6 +11,20 @@ app.post('/', async (c) => {
   const rawBody = await c.req.text();
   const signature = c.req.header('Monime-Signature');
 
+  // Debug: log what Monime sends vs what we compute
+  const { createHmac } = await import('node:crypto');
+  const computedHex = createHmac('sha256', process.env.MONIME_WEBHOOK_SECRET || '')
+    .update(rawBody)
+    .digest('hex');
+  const computedBase64 = createHmac('sha256', process.env.MONIME_WEBHOOK_SECRET || '')
+    .update(rawBody)
+    .digest('base64');
+  console.log(`[Webhook Debug] Received signature: ${signature}`);
+  console.log(`[Webhook Debug] Computed hex: ${computedHex}`);
+  console.log(`[Webhook Debug] Computed base64: ${computedBase64}`);
+  console.log(`[Webhook Debug] Body preview: ${rawBody.slice(0, 200)}`);
+  console.log(`[Webhook Debug] All headers: ${JSON.stringify(Object.fromEntries(c.req.raw.headers.entries()))}`);
+
   if (!signature || !verifyWebhookSignature(rawBody, signature)) {
     console.error('[Webhook] Invalid signature');
     return c.json({ error: 'Invalid signature' }, 401);
