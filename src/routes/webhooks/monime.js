@@ -1,6 +1,7 @@
 //@ts-check
 
 import { Hono } from 'hono';
+import { createHmac } from 'crypto';
 import { verifyWebhookSignature } from '../../utils/monime.js';
 import { transferUsdc } from '../../utils/solana.js';
 import { getDepositById, updateDeposit } from '../../repos/deposits.js';
@@ -12,8 +13,31 @@ app.post('/', async (c) => {
   const signature = c.req.header('Monime-Signature');
 
   if (!signature || !verifyWebhookSignature(rawBody, signature)) {
+    // Temporary debug: return what we see so we can diagnose the mismatch
+    const secret = process.env.MONIME_WEBHOOK_SECRET || '';
+    const parts = {};
+    if (signature) {
+      for (const part of signature.split(',')) {
+        const [key, ...rest] = part.split('=');
+        parts[key] = rest.join('=');
+      }
+    }
+    const ts = parts['t'] || '';
+    const computed = ts ? createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('base64') : 'no-ts';
+
     console.error('[Webhook] Invalid signature');
-    return c.json({ error: 'Invalid signature' }, 401);
+    return c.json({
+      error: 'Invalid signature',
+      debug: {
+        bodyLength: rawBody.length,
+        bodyFirst80: rawBody.substring(0, 80),
+        bodyLast40: rawBody.substring(rawBody.length - 40),
+        signatureHeader: signature || 'missing',
+        secretPrefix: secret.substring(0, 6),
+        computedSig: computed,
+        receivedSig: parts['v1'] || 'missing'
+      }
+    }, 401);
   }
 
   const payload = JSON.parse(rawBody);
