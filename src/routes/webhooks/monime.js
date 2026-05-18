@@ -34,7 +34,7 @@ app.post('/', async (c) => {
     return c.json({ received: true });
   }
 
-  if (deposit.status === 'completed' || deposit.status === 'failed') {
+  if (['completed', 'failed', 'expired'].includes(deposit.status)) {
     console.log(`[Webhook] Deposit ${deposit.id} already ${deposit.status}, skipping`);
     return c.json({ received: true });
   }
