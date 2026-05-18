@@ -1,7 +1,6 @@
 //@ts-check
 
 import { Hono } from 'hono';
-import { createHmac } from 'crypto';
 import { verifyWebhookSignature } from '../../utils/monime.js';
 import { transferUsdc } from '../../utils/solana.js';
 import { getDepositById, updateDeposit } from '../../repos/deposits.js';
@@ -11,41 +10,10 @@ const app = new Hono();
 app.post('/', async (c) => {
   const rawBody = await c.req.text();
   const signature = c.req.header('Monime-Signature');
-  const verified = signature && verifyWebhookSignature(rawBody, signature);
 
-  // DEBUG: Log everything to figure out Monime's exact signing method
-  const secret = process.env.MONIME_WEBHOOK_SECRET || '';
-  const parts = {};
-  if (signature) {
-    for (const part of signature.split(',')) {
-      const [key, ...rest] = part.split('=');
-      parts[key] = rest.join('=');
-    }
-  }
-  const ts = parts['t'] || '';
-  const received = parts['v1'] || '';
-
-  // Try every possible approach
-  const a1 = ts ? createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('base64') : '';
-  const a2 = ts ? createHmac('sha256', Buffer.from(secret, 'base64')).update(`${ts}.${rawBody}`).digest('base64') : '';
-  const a3 = createHmac('sha256', secret).update(rawBody).digest('base64');
-  const a4 = createHmac('sha256', Buffer.from(secret, 'base64')).update(rawBody).digest('base64');
-  const a5 = ts ? createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex') : '';
-  const a6 = createHmac('sha256', secret).update(rawBody).digest('hex');
-
-  console.log(`[Webhook Sig Debug] verified=${verified}`);
-  console.log(`[Webhook Sig Debug] received=${received}`);
-  console.log(`[Webhook Sig Debug] a1(str,ts.body,b64)=${a1}`);
-  console.log(`[Webhook Sig Debug] a2(b64key,ts.body,b64)=${a2}`);
-  console.log(`[Webhook Sig Debug] a3(str,body,b64)=${a3}`);
-  console.log(`[Webhook Sig Debug] a4(b64key,body,b64)=${a4}`);
-  console.log(`[Webhook Sig Debug] a5(str,ts.body,hex)=${a5}`);
-  console.log(`[Webhook Sig Debug] a6(str,body,hex)=${a6}`);
-  console.log(`[Webhook Sig Debug] bodyLen=${rawBody.length} secretLen=${secret.length} header=${signature}`);
-
-  if (!verified) {
-    console.error('[Webhook] Invalid signature — returning 200 to stop retries, NOT processing');
-    return c.json({ received: true });
+  if (!signature || !verifyWebhookSignature(rawBody, signature)) {
+    console.error('[Webhook] Invalid signature');
+    return c.json({ error: 'Invalid signature' }, 401);
   }
 
   const payload = JSON.parse(rawBody);

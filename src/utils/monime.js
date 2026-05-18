@@ -1,6 +1,6 @@
 //@ts-check
 
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { createMonimeError } from './errors.js';
 
 const BASE_URL = 'https://api.monime.io';
@@ -153,30 +153,37 @@ export async function getProviders() {
 }
 
 /**
- * Verify Monime webhook signature (Stripe-style: t=timestamp,v1=base64_hmac)
- * HMAC-SHA256 is computed over "${timestamp}.${rawBody}" using the webhook secret, base64-encoded.
- * @param {string} rawBody - Raw request body string
- * @param {string} signatureHeader - Value from Monime-Signature header
+ * Verify Monime webhook signature.
+ * Header: "Monime-Signature: t=<unix_seconds>,v1=<base64_hmac>"
+ * Signed payload uses underscore: "<timestamp>_<rawBody>". HMAC-SHA256 → base64.
+ * @param {string} rawBody
+ * @param {string} signatureHeader
  * @returns {boolean}
  */
 export function verifyWebhookSignature(rawBody, signatureHeader) {
   const secret = process.env.MONIME_WEBHOOK_SECRET;
+  if (!secret) return false;
 
-  // Parse "t=1234567890,v1=base64hash"
   const parts = {};
   for (const part of signatureHeader.split(',')) {
     const [key, ...rest] = part.split('=');
     parts[key] = rest.join('=');
   }
-
   const timestamp = parts['t'];
   const receivedSig = parts['v1'];
-
   if (!timestamp || !receivedSig) return false;
 
-  const computed = createHmac('sha256', secret)
-    .update(`${timestamp}.${rawBody}`)
+  const ts = parseInt(timestamp, 10);
+  if (Number.isNaN(ts)) return false;
+  const age = Math.floor(Date.now() / 1000) - ts;
+  if (age > 5 * 60 || age < -60) return false;
+
+  const expectedB64 = createHmac('sha256', secret)
+    .update(`${timestamp}_${rawBody}`, 'utf8')
     .digest('base64');
 
-  return computed === receivedSig;
+  const a = Buffer.from(receivedSig, 'base64');
+  const b = Buffer.from(expectedB64, 'base64');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
