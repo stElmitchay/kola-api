@@ -15,6 +15,7 @@ import { createDatabaseError } from '../../utils/errors.js';
  * @param {string} params.name
  * @param {string} params.businessName
  * @param {string} params.appName
+ * @param {string} [params.clientId]
  * @param {string} [params.expiresAt]
  * @param {object} [params.permissions]
  * @param {number} [params.rateLimit]
@@ -25,7 +26,7 @@ export async function createApiKey(params) {
   const keyHash = hashApiKey(rawKey);
 
   const { data, error } = await createApiKeyRepo({
-    client_id: randomUUID(),
+    client_id: params.clientId || randomUUID(),
     key_hash: keyHash,
     name: params.name,
     business_name: params.businessName,

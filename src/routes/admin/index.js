@@ -20,6 +20,7 @@ app.post('/api-keys', async (c) => {
     name: body.name,
     businessName: body.businessName,
     appName: body.appName,
+    clientId: body.clientId,
     expiresAt: body.expiresAt,
     permissions: body.permissions,
     rateLimit: body.rateLimit
