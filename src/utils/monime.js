@@ -34,8 +34,16 @@ async function monimeRequest(method, path, body, idempotencyKey) {
   const data = await response.json();
 
   if (!response.ok) {
-    const message = data.messages?.join(', ') || `Monime API error: ${response.status}`;
-    throw createMonimeError(message);
+    // Log everything Monime gave us so we can debug field-shape issues
+    console.error(`[Monime] ${method} ${path} → ${response.status}:`, JSON.stringify(data));
+    // Surface as much detail as possible
+    const detail =
+      (Array.isArray(data.messages) && data.messages.join(', ')) ||
+      (Array.isArray(data.errors) && data.errors.map(e => e.message || JSON.stringify(e)).join(', ')) ||
+      data.error?.message ||
+      data.message ||
+      JSON.stringify(data);
+    throw createMonimeError(`Monime API error ${response.status}: ${detail}`);
   }
 
   return data;
