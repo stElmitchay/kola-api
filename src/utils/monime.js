@@ -162,8 +162,8 @@ export async function createPayout(params) {
       source: { financialAccountId: process.env.MONIME_FINANCIAL_ACCOUNT_ID },
       destination: {
         type: 'momo',
-        accountId: params.phoneNumber,
-        providerCode: params.providerCode
+        providerId: params.providerCode,
+        phoneNumber: params.phoneNumber
       },
       reference: params.withdrawalId,
       metadata: params.metadata || {}
