@@ -157,31 +157,40 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
     throw createNotFoundError('Withdrawal not found');
   }
 
-  if (withdrawal.status !== 'pending_deposit') {
+  // Retry path: Solana side already succeeded but the Monime payout failed.
+  // Caller can re-submit /:id/confirm with the same signature to retry the payout.
+  const isPayoutRetry =
+    withdrawal.status === 'failed' &&
+    withdrawal.solana_tx_signature === solanaTxSignature &&
+    !withdrawal.monime_payout_id;
+
+  if (withdrawal.status !== 'pending_deposit' && !isPayoutRetry) {
     throw createValidationError(`Withdrawal cannot be confirmed (current status: ${withdrawal.status})`);
   }
 
-  if (new Date(withdrawal.expires_at).getTime() < Date.now()) {
-    await updateWithdrawal(id, { status: 'expired' });
-    throw createValidationError('Withdrawal has expired');
-  }
+  // Skip expiry + on-chain verification when retrying — we've already done that work
+  if (!isPayoutRetry) {
+    if (new Date(withdrawal.expires_at).getTime() < Date.now()) {
+      await updateWithdrawal(id, { status: 'expired' });
+      throw createValidationError('Withdrawal has expired');
+    }
 
-  const verification = await verifyIncomingUsdcTransfer(
-    solanaTxSignature,
-    withdrawal.from_wallet_address,
-    Number(withdrawal.amount_usdc)
-  );
-  if (!verification.ok) {
-    throw createValidationError(verification.reason);
-  }
+    const verification = await verifyIncomingUsdcTransfer(
+      solanaTxSignature,
+      withdrawal.from_wallet_address,
+      Number(withdrawal.amount_usdc)
+    );
+    if (!verification.ok) {
+      throw createValidationError(verification.reason);
+    }
 
-  // Mark received with the signature (unique index will block duplicates)
-  const { error: updateErr } = await updateWithdrawal(id, {
-    status: 'received',
-    solana_tx_signature: solanaTxSignature
-  });
-  if (updateErr) {
-    throw createDatabaseError(`Failed to record received tx: ${updateErr.message}`);
+    const { error: updateErr } = await updateWithdrawal(id, {
+      status: 'received',
+      solana_tx_signature: solanaTxSignature
+    });
+    if (updateErr) {
+      throw createDatabaseError(`Failed to record received tx: ${updateErr.message}`);
+    }
   }
 
   // Trigger Monime payout
