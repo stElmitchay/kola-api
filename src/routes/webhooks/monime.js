@@ -4,7 +4,11 @@ import { Hono } from 'hono';
 import { verifyWebhookSignature } from '../../utils/monime.js';
 import { transferUsdc } from '../../utils/solana.js';
 import { getDepositById, updateDeposit } from '../../repos/deposits.js';
-import { getWithdrawalById, updateWithdrawal } from '../../repos/withdrawals.js';
+import {
+  getWithdrawalById,
+  getWithdrawalByMonimePayoutId,
+  updateWithdrawal
+} from '../../repos/withdrawals.js';
 
 const app = new Hono();
 
@@ -19,22 +23,22 @@ app.post('/', async (c) => {
 
   const payload = JSON.parse(rawBody);
   const eventName = payload.event?.name || '';
-  const reference = payload.data?.reference;
 
-  console.log(`[Webhook] Received event: ${eventName}, reference: ${reference}`);
+  console.log(`[Webhook] Received event: ${eventName}`);
 
-  if (!reference) {
-    console.error('[Webhook] No reference in payload');
-    return c.json({ received: true });
-  }
-
-  // Route by event resource type
+  // Route by event resource type. Each handler is responsible for extracting
+  // the identifier it needs (reference for deposits, payout id for payouts).
   if (eventName.startsWith('payment_code.') || eventName.startsWith('checkout_session.')) {
+    const reference = payload.data?.reference;
+    if (!reference) {
+      console.error('[Webhook] No reference in deposit payload');
+      return c.json({ received: true });
+    }
     return handleDepositEvent(c, eventName, reference);
   }
 
   if (eventName.startsWith('payout.')) {
-    return handlePayoutEvent(c, eventName, reference, payload.data);
+    return handlePayoutEvent(c, eventName, payload.data);
   }
 
   console.log(`[Webhook] Ignoring unhandled event type: ${eventName}`);
@@ -84,14 +88,25 @@ async function handleDepositEvent(c, eventName, reference) {
 /**
  * @param {any} c
  * @param {string} eventName
- * @param {string} reference
  * @param {any} data
  */
-async function handlePayoutEvent(c, eventName, reference, data) {
-  const { data: withdrawal, error } = await getWithdrawalById(reference);
+async function handlePayoutEvent(c, eventName, data) {
+  // Payout webhooks identify the payout via `data.id` (Monime's payout id we
+  // stored when triggering it). Fall back to metadata.withdrawal_id.
+  const payoutId = data?.id;
+  const metadataWithdrawalId = data?.metadata?.withdrawal_id;
 
-  if (error || !withdrawal) {
-    console.error(`[Webhook] Withdrawal not found for reference: ${reference}`);
+  let result = null;
+  if (payoutId) {
+    result = await getWithdrawalByMonimePayoutId(payoutId);
+  }
+  if ((!result || !result.data) && metadataWithdrawalId) {
+    result = await getWithdrawalById(metadataWithdrawalId);
+  }
+
+  const withdrawal = result?.data;
+  if (!withdrawal) {
+    console.error(`[Webhook] Withdrawal not found for payout id=${payoutId} / metadata=${metadataWithdrawalId}`);
     return c.json({ received: true });
   }
 

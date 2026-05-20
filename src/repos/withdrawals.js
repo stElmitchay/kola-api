@@ -62,6 +62,22 @@ export async function getWithdrawalById(id) {
 }
 
 /**
+ * Get a withdrawal by the Monime payout ID (set when we trigger the payout).
+ * Used by the webhook handler since Monime payouts don't echo back a
+ * `reference` field — only the `id` they assigned.
+ * @param {string} monimePayoutId
+ */
+export async function getWithdrawalByMonimePayoutId(monimePayoutId) {
+  const { data, error } = await supabase
+    .from('withdrawals')
+    .select('*')
+    .eq('monime_payout_id', monimePayoutId)
+    .single();
+
+  return { data, error };
+}
+
+/**
  * List withdrawals with optional filters
  * @param {string} application
  * @param {object} [filters]

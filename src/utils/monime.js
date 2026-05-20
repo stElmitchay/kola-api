@@ -173,8 +173,7 @@ export async function createPayout(params) {
         providerId: params.providerCode,
         phoneNumber: params.phoneNumber
       },
-      reference: params.withdrawalId,
-      metadata: params.metadata || {}
+      metadata: { ...(params.metadata || {}), withdrawal_id: params.withdrawalId }
     },
     params.withdrawalId
   );
