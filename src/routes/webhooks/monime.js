@@ -125,9 +125,6 @@ async function handlePayoutEvent(c, eventName, data) {
       failure_reason: reason
     });
     console.log(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
-  } else if (eventName === 'payout.delayed') {
-    // Informational; keep current status
-    console.log(`[Webhook] Withdrawal ${withdrawal.id} delayed (still processing)`);
   }
 
   return c.json({ received: true });
