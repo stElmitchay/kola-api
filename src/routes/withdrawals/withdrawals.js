@@ -205,7 +205,8 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
 
     await updateWithdrawal(id, {
       status: 'processing',
-      monime_payout_id: payout.id
+      monime_payout_id: payout.id,
+      failure_reason: null
     });
   } catch (payoutError) {
     await updateWithdrawal(id, {
