@@ -25,6 +25,11 @@
     "vercel": "^32.7.2"
   },
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
+  },
+  "overrides": {
+    "rpc-websockets": {
+      "uuid": "^9.0.0"
+    }
   }
 }
