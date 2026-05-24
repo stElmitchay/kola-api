@@ -9,7 +9,9 @@ import {
   getWithdrawal as getWithdrawalRepo,
   listWithdrawals as listWithdrawalsRepo,
   updateWithdrawal,
-  sumWithdrawalsForPhoneSince
+  updateWithdrawalIfStatus,
+  sumWithdrawalsForPhoneSince,
+  findPendingByWalletAndAmount
 } from '../../repos/withdrawals.js';
 import { getActiveRate } from '../../repos/exchange-rates.js';
 import {
@@ -108,6 +110,20 @@ export async function initiateWithdrawal(params) {
     throw createValidationError('Amount too small to produce any SLE after fee');
   }
 
+  // Refuse a duplicate while one is still open. Keeps the (wallet, amount)
+  // pair unambiguous so the Helius auto-confirm handler can match an incoming
+  // USDC transfer to exactly one withdrawal.
+  const { data: openDup } = await findPendingByWalletAndAmount(
+    params.fromWalletAddress,
+    params.amountUsdc
+  );
+  if (openDup) {
+    throw createValidationError(
+      `An open withdrawal already exists for this wallet and amount ` +
+      `(id: ${openDup.id}). Complete or wait for it to expire before creating another.`
+    );
+  }
+
   const expiresAt = new Date(Date.now() + WITHDRAWAL_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
   const { data: withdrawal, error: insertError } = await createWithdrawalRepo({
@@ -168,6 +184,8 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
     throw createValidationError(`Withdrawal cannot be confirmed (current status: ${withdrawal.status})`);
   }
 
+  let workingRow = withdrawal;
+
   // Skip expiry + on-chain verification when retrying — we've already done that work
   if (!isPayoutRetry) {
     if (new Date(withdrawal.expires_at).getTime() < Date.now()) {
@@ -184,16 +202,38 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
       throw createValidationError(verification.reason);
     }
 
-    const { error: updateErr } = await updateWithdrawal(id, {
-      status: 'received',
-      solana_tx_signature: solanaTxSignature
-    });
-    if (updateErr) {
-      throw createDatabaseError(`Failed to record received tx: ${updateErr.message}`);
+    // CAS: only the writer that flips pending_deposit → received gets to
+    // fire the Monime payout. Prevents a double-fire when the Helius
+    // auto-confirm webhook races this manual confirm call.
+    const { data: claimed, error: claimErr } = await updateWithdrawalIfStatus(
+      id,
+      'pending_deposit',
+      { status: 'received', solana_tx_signature: solanaTxSignature }
+    );
+    if (claimErr) {
+      throw createDatabaseError(`Failed to record received tx: ${claimErr.message}`);
     }
+    if (!claimed) {
+      // Helius (or another writer) already advanced this row. Don't double-fire.
+      return getWithdrawalStatus(id, application);
+    }
+    workingRow = claimed;
   }
 
-  // Trigger Monime payout
+  await triggerPayoutForWithdrawal(workingRow);
+
+  return getWithdrawalStatus(id, application);
+}
+
+/**
+ * Fire the Monime payout for a withdrawal whose USDC has been verified on-chain.
+ * On success advances the row to 'processing' and records monime_payout_id.
+ * On failure writes 'failed' + failure_reason and rethrows so the caller can
+ * decide whether to surface the error (manual confirm: yes, webhook: swallow + 200).
+ *
+ * @param {object} withdrawal
+ */
+export async function triggerPayoutForWithdrawal(withdrawal) {
   try {
     const payout = await createPayout({
       withdrawalId: withdrawal.id,
@@ -203,20 +243,18 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
       metadata: { withdrawal_id: withdrawal.id }
     });
 
-    await updateWithdrawal(id, {
+    await updateWithdrawal(withdrawal.id, {
       status: 'processing',
       monime_payout_id: payout.id,
       failure_reason: null
     });
   } catch (payoutError) {
-    await updateWithdrawal(id, {
+    await updateWithdrawal(withdrawal.id, {
       status: 'failed',
       failure_reason: `Monime payout failed: ${payoutError.message}`
     });
     throw payoutError;
   }
-
-  return getWithdrawalStatus(id, application);
 }
 
 /**

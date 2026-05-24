@@ -10,6 +10,7 @@ import wallets from '../src/routes/wallets/index.js';
 import deposits from '../src/routes/deposits/index.js';
 import withdrawals from '../src/routes/withdrawals/index.js';
 import monimeWebhook from '../src/routes/webhooks/monime.js';
+import heliusWebhook from '../src/routes/webhooks/helius.js';
 
 const app = new Hono().basePath('/api');
 
@@ -40,6 +41,7 @@ app.route('/v1/withdrawals', withdrawals);
 
 // Webhook routes (signature verified)
 app.route('/webhooks/monime', monimeWebhook);
+app.route('/webhooks/helius', heliusWebhook);
 
 // Global fallback error handler
 app.onError((err, c) => {
