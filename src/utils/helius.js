@@ -1,0 +1,26 @@
+//@ts-check
+
+import { timingSafeEqual } from 'crypto';
+
+/**
+ * Verify the Helius webhook auth header. Helius lets you configure a static
+ * "Authentication Header" value in the dashboard; it sends that exact string
+ * back in the Authorization header on every callback. We compare it in
+ * constant time against the env-configured expected value.
+ *
+ * @param {string} headerValue
+ * @returns {boolean}
+ */
+export function verifyHeliusAuth(headerValue) {
+  const expected = process.env.HELIUS_WEBHOOK_AUTH_HEADER;
+  if (!expected) {
+    console.error('[Helius] HELIUS_WEBHOOK_AUTH_HEADER not configured');
+    return false;
+  }
+  if (!headerValue) return false;
+
+  const a = Buffer.from(headerValue);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}

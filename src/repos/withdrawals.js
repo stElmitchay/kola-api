@@ -78,6 +78,54 @@ export async function getWithdrawalByMonimePayoutId(monimePayoutId) {
 }
 
 /**
+ * Find the single open (pending_deposit, not expired) withdrawal matching
+ * a (from_wallet_address, amount_usdc) pair. Used in two places:
+ *  - initiateWithdrawal: refuse a duplicate while one is open, so the pair
+ *    is unique by construction
+ *  - Helius auto-confirm handler: identify which withdrawal an incoming
+ *    USDC transfer settles
+ * Unscoped by application since Helius watches the treasury globally.
+ * @param {string} fromWalletAddress
+ * @param {number} amountUsdc
+ */
+export async function findPendingByWalletAndAmount(fromWalletAddress, amountUsdc) {
+  const { data, error } = await supabase
+    .from('withdrawals')
+    .select('*')
+    .eq('from_wallet_address', fromWalletAddress)
+    .eq('amount_usdc', amountUsdc)
+    .eq('status', 'pending_deposit')
+    .gt('expires_at', new Date().toISOString())
+    .maybeSingle();
+
+  return { data, error };
+}
+
+/**
+ * Compare-and-swap update: only writes if the row is still in expectedStatus.
+ * Returns data=null (without an error) when another writer has already moved
+ * the row past expectedStatus, letting concurrent paths (manual /:id/confirm
+ * and Helius auto-confirm) coexist without double-firing the payout.
+ * @param {string} id
+ * @param {string} expectedStatus
+ * @param {object} updates
+ */
+export async function updateWithdrawalIfStatus(id, expectedStatus, updates) {
+  const { data, error } = await supabase
+    .from('withdrawals')
+    .update({
+      ...updates,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', id)
+    .eq('status', expectedStatus)
+    .select()
+    .maybeSingle();
+
+  return { data, error };
+}
+
+/**
  * List withdrawals with optional filters
  * @param {string} application
  * @param {object} [filters]
