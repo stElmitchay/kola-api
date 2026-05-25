@@ -25,8 +25,11 @@ export async function handleHeliusEvent(events) {
   const usdcMint = process.env.USDC_MINT;
 
   for (const ev of events) {
-    if (ev?.type !== 'TOKEN_TRANSFER') continue;
-
+    // No `ev.type` filter — Helius enriches SPL transfers as type="TRANSFER"
+    // (source SOLANA_PROGRAM_LIBRARY), not "TOKEN_TRANSFER" as the dashboard
+    // filter labels suggest. The Helius dashboard already gates which events
+    // fire to us by address + type, so it's safe to inspect tokenTransfers
+    // unconditionally here.
     const transfers = Array.isArray(ev.tokenTransfers) ? ev.tokenTransfers : [];
     for (const t of transfers) {
       if (t?.mint !== usdcMint) continue;
