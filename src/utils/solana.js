@@ -211,12 +211,15 @@ export async function sendSerializedTransaction(serialized, signature, blockhash
 
 /**
  * Current Solana block height — used by the transfer-tick worker to decide
- * whether a 'sending' job's blockhash has provably expired.
+ * whether a 'sending' job's blockhash has provably expired. 'finalized'
+ * explicitly (rather than the connection's default commitment) so the
+ * rebuild decision is made against the same commitment level the
+ * lastValidBlockHeight was computed under.
  * @returns {Promise<number>}
  */
 export async function getCurrentBlockHeight() {
   const connection = getConnection();
-  return connection.getBlockHeight();
+  return connection.getBlockHeight('finalized');
 }
 
 /**

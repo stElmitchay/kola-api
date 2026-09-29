@@ -28,6 +28,9 @@ app.use('/*', cors({
 app.use('/v1/deposits/*', killSwitch);
 app.use('/v1/withdrawals/*', killSwitch);
 app.use('/webhooks/*', killSwitch);
+// KOLA_PAUSE must also stop the transfer worker from broadcasting during an
+// incident; a 503 to the cron invoker is harmless — it just retries next tick.
+app.use('/internal/*', killSwitch);
 
 app.get('/', (c) => {
   return c.json({
