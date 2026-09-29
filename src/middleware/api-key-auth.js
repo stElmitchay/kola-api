@@ -11,7 +11,7 @@ import { createSupabaseClient } from '../utils/supabase.js';
  * @param {Function} next
  */
 export async function apiKeyAuth(c, next) {
-  const apiKey = c.req.header('X-API-Key') || c.req.query('api_key');
+  const apiKey = c.req.header('X-API-Key'); // query-param auth removed: keys leak into logs and Referer (F13)
 
   if (!apiKey) {
     return c.json({ error: 'Missing API key' }, 401);
@@ -35,10 +35,14 @@ export async function apiKeyAuth(c, next) {
     return c.json({ error: 'API key expired' }, 401);
   }
 
-  await supabase
-    .from('auth_api_keys')
-    .update({ last_used_at: new Date().toISOString() })
-    .eq('id', data.id);
+  const STALE_MS = 5 * 60 * 1000;
+  if (!data.last_used_at || Date.now() - new Date(data.last_used_at).getTime() > STALE_MS) {
+    supabase
+      .from('auth_api_keys')
+      .update({ last_used_at: new Date().toISOString() })
+      .eq('id', data.id)
+      .then(() => {}, () => {}); // fire-and-forget; auth must not block on telemetry
+  }
 
   c.set('clientId', data.client_id);
   c.set('application', data.id);

@@ -11,10 +11,22 @@ import deposits from '../src/routes/deposits/index.js';
 import withdrawals from '../src/routes/withdrawals/index.js';
 import monimeWebhook from '../src/routes/webhooks/monime.js';
 import heliusWebhook from '../src/routes/webhooks/helius.js';
+import { killSwitch } from '../src/middleware/kill-switch.js';
 
 const app = new Hono().basePath('/api');
 
-app.use('/*', cors());
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+app.use('/*', cors({
+  origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
+  allowHeaders: ['Content-Type', 'X-API-Key', 'X-Admin-Key', 'X-Application-Id', 'Idempotency-Key'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
+
+app.use('/v1/deposits/*', killSwitch);
+app.use('/v1/withdrawals/*', killSwitch);
+app.use('/webhooks/*', killSwitch);
 
 app.get('/', (c) => {
   return c.json({
