@@ -853,7 +853,7 @@ outstanding is deploying it and watching the first few live runs.
    `wallets`, `deposits`, and `withdrawals` routers, mounted after
    `apiKeyAuth` and before the per-route idempotency middleware. Until the
    env vars above are set, the middleware fails open (passes every request
-   through, logs one `console.warn`) — no client-visible change happens
+   through, logs one `logger.warn` line) — no client-visible change happens
    until Upstash is actually provisioned.
 
 3. **Confirm enforcement end-to-end** once the env vars are set: fire

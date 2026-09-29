@@ -1,6 +1,7 @@
 //@ts-check
 
 import { createSupabaseClient } from '../utils/supabase.js';
+import { envInt } from '../utils/config.js';
 
 const supabase = createSupabaseClient();
 
@@ -39,7 +40,7 @@ export async function setRate(application, rate, setBy) {
  * @param {{ rate: string|number, created_at: string }} rateRow
  */
 export function assertRateFresh(rateRow) {
-  const maxAgeMinutes = parseInt(process.env.RATE_MAX_AGE_MINUTES || '1440', 10);
+  const maxAgeMinutes = envInt('RATE_MAX_AGE_MINUTES');
   const ageMs = Date.now() - new Date(rateRow.created_at).getTime();
   if (ageMs > maxAgeMinutes * 60_000) {
     const err = new Error('Exchange rate is stale. An operator must set a fresh rate.');

@@ -7,6 +7,7 @@ import {
   getRateHistory as getRateHistoryRepo
 } from '../../repos/exchange-rates.js';
 import { createDatabaseError, createValidationError } from '../../utils/errors.js';
+import { envInt } from '../../utils/config.js';
 
 /**
  * Set a new exchange rate for an application. Refuses a move of more than
@@ -28,7 +29,7 @@ export async function setExchangeRate(application, rate, actor, opts = {}) {
     throw createValidationError('Rate must be a positive number');
   }
 
-  const maxMoveBps = parseInt(process.env.RATE_MAX_MOVE_BPS || '500', 10);
+  const maxMoveBps = envInt('RATE_MAX_MOVE_BPS');
   const { data: current } = await getActiveRate(application);
   if (current && !opts.force) {
     const prev = new BigNumber(current.rate);

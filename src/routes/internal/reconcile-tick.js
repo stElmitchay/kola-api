@@ -9,13 +9,13 @@ import {
 } from '../../repos/reconciliation.js';
 import { errorEnvelope } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
+import { envInt } from '../../utils/config.js';
 
 // Balance proof tolerance: USDC (unlike SOL, which pays gas) never moves on
 // its own — any non-zero difference between the on-chain treasury ATA
 // balance and the ledger's treasury_usdc account is a real gap, not noise.
 const BALANCE_TOLERANCE_MINOR = 0n;
 const DEFAULT_SIGNATURE_LIMIT = 50;
-const DEFAULT_STUCK_THRESHOLD_MINUTES = 30;
 
 const app = new Hono();
 
@@ -85,7 +85,7 @@ export async function proveBalance() {
  * @returns {Promise<{table: string, id: string, status: string, age_minutes: number}[]>}
  */
 export async function sweepStuckRows() {
-  const thresholdMinutes = Number(process.env.STUCK_THRESHOLD_MINUTES) || DEFAULT_STUCK_THRESHOLD_MINUTES;
+  const thresholdMinutes = envInt('STUCK_THRESHOLD_MINUTES');
   const stale = await listStaleInflight(thresholdMinutes);
   for (const row of stale) {
     logger.error(
