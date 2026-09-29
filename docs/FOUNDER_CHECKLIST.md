@@ -913,3 +913,38 @@ outstanding is deploying it and watching the first few live runs.
    `request_id` is echoed in every error envelope above — useful for
    correlating a client-reported error with the corresponding server log
    line.
+
+## Task C5 — set SOLANA_RPC_FALLBACK_URL + verify failover
+
+1. **Provision a second Solana RPC provider** (any provider other than the
+   one behind `HELIUS_URL`) and set `SOLANA_RPC_FALLBACK_URL` in Vercel
+   (production + preview) and local `.env` — see `.env.example`. Leaving
+   it unset is safe: `withRpcFailover()` (`src/utils/connection.js`) just
+   rethrows the primary's error with no retry, which is today's behavior.
+
+2. **Verify failover end-to-end** once the env var is set: point
+   `HELIUS_URL` at an unreachable/invalid endpoint temporarily (or block it
+   at the network level) in a non-production environment and confirm a
+   read (e.g. `GET /v1/wallets/:address/balance`) still succeeds via the
+   fallback, and that a `[RPC] primary failed, trying fallback` line with
+   `alert:true` appears in the log stream.
+
+3. **Commitment level changed:** the connection (both primary and
+   fallback) now defaults to `'finalized'` instead of `'confirmed'` (B3
+   deferral, F17) — deposits/payouts already had several call sites pinned
+   to `'finalized'` individually; this closes the gap for the rest.
+   Finalized confirmation is slower than confirmed (waits for a
+   supermajority-rooted block, typically several more seconds), so expect
+   slightly higher latency on balance checks and signature-status polling.
+   No action needed — this is a correctness fix, flagging the latency
+   change in case it shows up in monitoring.
+
+4. **Helius dashboard check (V-D):** log into the Helius dashboard and
+   check whether the current plan supports webhook HMAC/request signing.
+   Record the outcome in `docs/fixtures/helius/AUTH.md`:
+   - If available: enable it, then extend `verifyHeliusAuth`
+     (`src/utils/helius.js`) to verify the signature header instead of the
+     static bearer.
+   - If not available: no action needed — `docs/fixtures/helius/AUTH.md`
+     already documents why the static bearer is an acceptable posture
+     (the handler never trusts the payload's money claims; see that file).

@@ -2,7 +2,7 @@
 
 import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddress } from '@solana/spl-token';
-import { getConnection } from '../utils/connection.js';
+import { withRpcFailover } from '../utils/connection.js';
 import { getTreasuryAddress } from '../utils/solana.js';
 import { createSupabaseClient } from '../utils/supabase.js';
 import { logger } from '../utils/logger.js';
@@ -31,10 +31,11 @@ async function getTreasuryAta() {
  * @returns {Promise<string[]>}
  */
 export async function getRecentTreasurySignatures(limit = 50) {
-  const connection = getConnection();
   const ata = await getTreasuryAta();
-  const sigs = await connection.getSignaturesForAddress(ata, { limit });
-  return (sigs || []).map((s) => s.signature);
+  return withRpcFailover(async (connection) => {
+    const sigs = await connection.getSignaturesForAddress(ata, { limit });
+    return (sigs || []).map((s) => s.signature);
+  });
 }
 
 /**
@@ -144,14 +145,13 @@ export function adaptParsedTransaction(signature, parsedTx, usdcMint, treasuryAt
  * @returns {Promise<{signature: string, tokenTransfers: object[]}[]>}
  */
 export async function getParsedTransfersForSignature(signature) {
-  const connection = getConnection();
   const usdcMint = process.env.USDC_MINT;
   const treasuryAta = (await getTreasuryAta()).toBase58();
 
-  const tx = await connection.getParsedTransaction(signature, {
+  const tx = await withRpcFailover((connection) => connection.getParsedTransaction(signature, {
     maxSupportedTransactionVersion: 0,
     commitment: 'finalized'
-  });
+  }));
   if (!tx || tx.meta?.err) return [];
 
   const event = adaptParsedTransaction(signature, tx, usdcMint, treasuryAta);

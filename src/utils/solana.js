@@ -17,7 +17,7 @@ import {
 } from '@solana/spl-token';
 import BigNumber from 'bignumber.js';
 import bs58 from 'bs58';
-import { getConnection } from './connection.js';
+import { getConnection, withRpcFailover } from './connection.js';
 import { createOnChainError } from './errors.js';
 
 /**
@@ -180,12 +180,13 @@ export async function buildSignedUsdcTransfer(destinationAddress, amountMinorUni
  * @returns {Promise<'finalized'|'pending'|'not_found'>}
  */
 export async function checkSignatureLanded(signature) {
-  const connection = getConnection();
-  const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
-  const s = value[0];
-  if (!s) return 'not_found';
-  if (s.err) return 'not_found';                    // landed-but-failed: safe to rebuild
-  return s.confirmationStatus === 'finalized' ? 'finalized' : 'pending';
+  return withRpcFailover(async (connection) => {
+    const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const s = value[0];
+    if (!s) return 'not_found';
+    if (s.err) return 'not_found';                    // landed-but-failed: safe to rebuild
+    return s.confirmationStatus === 'finalized' ? 'finalized' : 'pending';
+  });
 }
 
 /**
@@ -199,14 +200,15 @@ export async function checkSignatureLanded(signature) {
  * @returns {Promise<void>}
  */
 export async function sendSerializedTransaction(serialized, signature, blockhash, lastValidBlockHeight) {
-  const connection = getConnection();
-  await connection.sendRawTransaction(serialized, { skipPreflight: false });
-  const { value } = await connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight }, 'finalized'
-  );
-  if (value.err) {
-    throw createOnChainError(`Transaction ${signature} confirmed with error: ${JSON.stringify(value.err)}`);
-  }
+  await withRpcFailover(async (connection) => {
+    await connection.sendRawTransaction(serialized, { skipPreflight: false });
+    const { value } = await connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight }, 'finalized'
+    );
+    if (value.err) {
+      throw createOnChainError(`Transaction ${signature} confirmed with error: ${JSON.stringify(value.err)}`);
+    }
+  });
 }
 
 /**
@@ -218,8 +220,7 @@ export async function sendSerializedTransaction(serialized, signature, blockhash
  * @returns {Promise<number>}
  */
 export async function getCurrentBlockHeight() {
-  const connection = getConnection();
-  return connection.getBlockHeight('finalized');
+  return withRpcFailover((connection) => connection.getBlockHeight('finalized'));
 }
 
 /**
@@ -234,17 +235,16 @@ export async function getCurrentBlockHeight() {
  */
 export async function verifyIncomingUsdcTransfer(txSignature, expectedFromWallet, expectedAmount) {
   try {
-    const connection = getConnection();
     const treasury = getTreasuryKeypair();
     const usdcMint = getUsdcMint();
 
     const treasuryAta = (await getAssociatedTokenAddress(usdcMint, treasury.publicKey)).toBase58();
     const senderAta = (await getAssociatedTokenAddress(usdcMint, new PublicKey(expectedFromWallet))).toBase58();
 
-    const tx = await connection.getParsedTransaction(txSignature, {
+    const tx = await withRpcFailover((connection) => connection.getParsedTransaction(txSignature, {
       maxSupportedTransactionVersion: 0,
       commitment: 'finalized'
-    });
+    }));
     if (!tx) {
       return { ok: false, reason: 'Transaction not found or not yet finalized' };
     }
@@ -288,16 +288,17 @@ export async function verifyIncomingUsdcTransfer(txSignature, expectedFromWallet
  * @returns {Promise<bigint>}
  */
 export async function getTreasuryUsdcBalanceMinor() {
-  const connection = getConnection();
   const treasury = getTreasuryKeypair();
   const usdcMint = getUsdcMint();
   const ata = await getAssociatedTokenAddress(usdcMint, treasury.publicKey);
-  try {
-    const account = await getAccount(connection, ata);
-    return account.amount; // bigint, already minor units
-  } catch {
-    return 0n;
-  }
+  return withRpcFailover(async (connection) => {
+    try {
+      const account = await getAccount(connection, ata);
+      return account.amount; // bigint, already minor units
+    } catch {
+      return 0n;
+    }
+  });
 }
 
 /**
@@ -307,14 +308,13 @@ export async function getTreasuryUsdcBalanceMinor() {
  */
 export async function getUsdcBalance(walletAddress) {
   try {
-    const connection = getConnection();
     const usdcMint = getUsdcMint();
     const walletPubkey = new PublicKey(walletAddress);
 
     const ata = await getAssociatedTokenAddress(usdcMint, walletPubkey, true);
 
     try {
-      const account = await getAccount(connection, ata);
+      const account = await withRpcFailover((connection) => getAccount(connection, ata));
       const rawBalance = account.amount.toString();
       const balance = new BigNumber(rawBalance)
         .dividedBy(new BigNumber(10).pow(6))
