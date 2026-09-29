@@ -7,7 +7,6 @@ jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({
   getActiveRate, assertRateFresh: jest.fn()
 }));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
-  deriveWalletFromPhone: jest.fn(),
   getTreasuryUsdcBalanceMinor
 }));
 jest.unstable_mockModule('../../src/utils/monime.js', () => ({
@@ -16,9 +15,6 @@ jest.unstable_mockModule('../../src/utils/monime.js', () => ({
 jest.unstable_mockModule('../../src/repos/deposits.js', () => ({
   createDeposit: jest.fn(), getDeposit: jest.fn(), listDeposits: jest.fn(),
   updateDeposit: jest.fn(), updateDepositIfStatus: jest.fn(), getDepositById: jest.fn()
-}));
-jest.unstable_mockModule('../../src/repos/wallets.js', () => ({
-  getWalletByPhone: jest.fn(), createWallet: jest.fn()
 }));
 
 const { initiateDeposit } = await import('../../src/routes/deposits/deposits.js');

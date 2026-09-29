@@ -8,12 +8,6 @@ jest.unstable_mockModule('../../src/middleware/api-key-auth.js', () => ({
     await next();
   }
 }));
-// repos/wallets.js creates a Supabase client at module load time; stub it
-// out so importing the route doesn't require real env vars.
-jest.unstable_mockModule('../../src/utils/supabase.js', () => ({
-  createSupabaseClient: () => ({})
-}));
-
 const walletsApp = (await import('../../src/routes/wallets/index.js')).default;
 
 test('POST /v1/wallets/derive returns 410 Gone', async () => {

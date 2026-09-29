@@ -3,13 +3,10 @@
 import {
   Keypair,
   PublicKey,
-  SystemProgram,
-  Transaction,
-  sendAndConfirmTransaction
+  Transaction
 } from '@solana/web3.js';
 import {
   getAssociatedTokenAddress,
-  createAssociatedTokenAccountInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
   getAccount,
@@ -18,7 +15,7 @@ import {
 } from '@solana/spl-token';
 import BigNumber from 'bignumber.js';
 import bs58 from 'bs58';
-import { getConnection, withRpcFailover } from './connection.js';
+import { withRpcFailover } from './connection.js';
 import { createOnChainError } from './errors.js';
 
 /**
@@ -49,98 +46,6 @@ function getUsdcMint() {
  */
 export function getTreasuryAddress() {
   return getTreasuryKeypair().publicKey.toBase58();
-}
-
-/**
- * Derive a deterministic wallet address from a phone number
- * Uses the treasury public key as the base and phone number as the seed
- * @param {string} phoneNumber - Normalized phone number (e.g., +23276123456)
- * @returns {Promise<{ address: string, publicKey: PublicKey }>}
- */
-export async function deriveWalletFromPhone(phoneNumber) {
-  const treasury = getTreasuryKeypair();
-  const seed = phoneNumber.replace('+', '');
-  const derivedPubkey = await PublicKey.createWithSeed(
-    treasury.publicKey,
-    seed,
-    SystemProgram.programId
-  );
-  return {
-    address: derivedPubkey.toBase58(),
-    publicKey: derivedPubkey
-  };
-}
-
-/**
- * Ensure a USDC associated token account exists for the given wallet
- * Creates it if it doesn't exist (funded by treasury)
- * @param {PublicKey} walletPublicKey
- * @returns {Promise<PublicKey>} The token account address
- */
-export async function ensureTokenAccount(walletPublicKey) {
-  const connection = getConnection();
-  const treasury = getTreasuryKeypair();
-  const usdcMint = getUsdcMint();
-
-  const ata = await getAssociatedTokenAddress(usdcMint, walletPublicKey, true);
-
-  try {
-    await getAccount(connection, ata);
-    return ata;
-  } catch {
-    const transaction = new Transaction().add(
-      createAssociatedTokenAccountInstruction(
-        treasury.publicKey,
-        ata,
-        walletPublicKey,
-        usdcMint
-      )
-    );
-
-    await sendAndConfirmTransaction(connection, transaction, [treasury]);
-    return ata;
-  }
-}
-
-/**
- * Transfer USDC from treasury to a destination wallet
- * @param {string} destinationAddress - Solana wallet address (base58)
- * @param {number} amountMinorUnits - USDC amount in minor units (1 USDC = 1_000_000)
- * @returns {Promise<string>} Transaction signature
- */
-export async function transferUsdc(destinationAddress, amountMinorUnits) {
-  try {
-    const connection = getConnection();
-    const treasury = getTreasuryKeypair();
-    const usdcMint = getUsdcMint();
-    const destinationPubkey = new PublicKey(destinationAddress);
-
-    const treasuryAta = await getAssociatedTokenAddress(
-      usdcMint,
-      treasury.publicKey
-    );
-
-    const destinationAta = await ensureTokenAccount(destinationPubkey);
-
-    const transaction = new Transaction().add(
-      createTransferInstruction(
-        treasuryAta,
-        destinationAta,
-        treasury.publicKey,
-        BigInt(amountMinorUnits)
-      )
-    );
-
-    const signature = await sendAndConfirmTransaction(
-      connection,
-      transaction,
-      [treasury]
-    );
-
-    return signature;
-  } catch (error) {
-    throw createOnChainError(`USDC transfer failed: ${error.message}`);
-  }
 }
 
 /**
