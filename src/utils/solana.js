@@ -13,7 +13,9 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
   getAccount,
-  TOKEN_PROGRAM_ID
+  TOKEN_PROGRAM_ID,
+  TokenAccountNotFoundError,
+  TokenInvalidAccountOwnerError
 } from '@solana/spl-token';
 import BigNumber from 'bignumber.js';
 import bs58 from 'bs58';
@@ -151,7 +153,6 @@ export async function transferUsdc(destinationAddress, amountMinorUnits) {
  * @returns {Promise<{ signature: string, serialized: Buffer, blockhash: string, lastValidBlockHeight: number }>}
  */
 export async function buildSignedUsdcTransfer(destinationAddress, amountMinorUnits) {
-  const connection = getConnection();
   const treasury = getTreasuryKeypair();
   const usdcMint = getUsdcMint();
   const destination = new PublicKey(destinationAddress);
@@ -159,7 +160,9 @@ export async function buildSignedUsdcTransfer(destinationAddress, amountMinorUni
   const treasuryAta = await getAssociatedTokenAddress(usdcMint, treasury.publicKey);
   const destinationAta = await getAssociatedTokenAddress(usdcMint, destination, true);
 
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+  const { blockhash, lastValidBlockHeight } = await withRpcFailover(
+    (connection) => connection.getLatestBlockhash('finalized')
+  );
   const tx = new Transaction({ feePayer: treasury.publicKey, blockhash, lastValidBlockHeight }).add(
     createAssociatedTokenAccountIdempotentInstruction(
       treasury.publicKey, destinationAta, destination, usdcMint
@@ -285,6 +288,16 @@ export async function verifyIncomingUsdcTransfer(txSignature, expectedFromWallet
 /**
  * Treasury ATA balance in USDC minor units. Used as a payout precondition
  * and by the reconciliation job.
+ *
+ * Only `TokenAccountNotFoundError`/`TokenInvalidAccountOwnerError` — the
+ * ATA genuinely doesn't exist yet — resolve to `0n`. Any other error
+ * (network/timeout/5xx) rethrows: swallowing it into `0n` used to make
+ * `proveBalance` (src/routes/internal/reconcile-tick.js) fire a false
+ * RECONCILIATION_MISMATCH alert on any RPC blip, and made deposit
+ * initiation refuse quotes with a misleading "insufficient treasury
+ * balance" reason instead of the real transport error. Letting the error
+ * propagate also lets `withRpcFailover` retry it against the fallback
+ * instead of masking it before the wrapper ever sees a failure.
  * @returns {Promise<bigint>}
  */
 export async function getTreasuryUsdcBalanceMinor() {
@@ -295,14 +308,25 @@ export async function getTreasuryUsdcBalanceMinor() {
     try {
       const account = await getAccount(connection, ata);
       return account.amount; // bigint, already minor units
-    } catch {
-      return 0n;
+    } catch (err) {
+      if (err instanceof TokenAccountNotFoundError || err instanceof TokenInvalidAccountOwnerError) {
+        return 0n;
+      }
+      throw err;
     }
   });
 }
 
 /**
  * Get USDC balance for a wallet address
+ *
+ * Same account-not-found-vs-transport-failure distinction as
+ * `getTreasuryUsdcBalanceMinor`: only a genuinely nonexistent ATA
+ * (`TokenAccountNotFoundError`/`TokenInvalidAccountOwnerError`) resolves
+ * to a zero balance. Any other error propagates out of `withRpcFailover`
+ * (after a fallback retry, if configured) and surfaces as a thrown
+ * `OnChainError` — a caller reading a real `0.000000` must be able to
+ * trust it, not have it mean "the RPC call failed."
  * @param {string} walletAddress - Solana wallet address (base58)
  * @returns {Promise<{ balance: string, rawBalance: string }>}
  */
@@ -313,16 +337,25 @@ export async function getUsdcBalance(walletAddress) {
 
     const ata = await getAssociatedTokenAddress(usdcMint, walletPubkey, true);
 
-    try {
-      const account = await withRpcFailover((connection) => getAccount(connection, ata));
-      const rawBalance = account.amount.toString();
-      const balance = new BigNumber(rawBalance)
-        .dividedBy(new BigNumber(10).pow(6))
-        .toFixed(6);
-      return { balance, rawBalance };
-    } catch {
+    const account = await withRpcFailover(async (connection) => {
+      try {
+        return await getAccount(connection, ata);
+      } catch (err) {
+        if (err instanceof TokenAccountNotFoundError || err instanceof TokenInvalidAccountOwnerError) {
+          return null;
+        }
+        throw err;
+      }
+    });
+
+    if (!account) {
       return { balance: '0.000000', rawBalance: '0' };
     }
+    const rawBalance = account.amount.toString();
+    const balance = new BigNumber(rawBalance)
+      .dividedBy(new BigNumber(10).pow(6))
+      .toFixed(6);
+    return { balance, rawBalance };
   } catch (error) {
     throw createOnChainError(`Failed to fetch balance: ${error.message}`);
   }
