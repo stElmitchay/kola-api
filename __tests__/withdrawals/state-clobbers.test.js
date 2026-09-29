@@ -7,8 +7,9 @@ const getWithdrawalRepo = jest.fn();
 const postWithdrawalReceipt = jest.fn();
 const verifyIncomingUsdcTransfer = jest.fn();
 
+const createWithdrawalRepo = jest.fn();
 jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
-  createWithdrawal: jest.fn(), getWithdrawal: getWithdrawalRepo,
+  createWithdrawal: createWithdrawalRepo, getWithdrawal: getWithdrawalRepo,
   listWithdrawals: jest.fn(), updateWithdrawal, updateWithdrawalIfStatus,
   sumWithdrawalsForPhoneSince: jest.fn(), findPendingByWalletAndAmount: jest.fn()
 }));
@@ -54,12 +55,14 @@ test('F8: processing write is CAS from received; a lost CAS still records the pa
 });
 
 test('F19: duplicate-open error does not reveal the other withdrawal id', async () => {
-  const { findPendingByWalletAndAmount, sumWithdrawalsForPhoneSince } =
-    await import('../../src/repos/withdrawals.js');
-  sumWithdrawalsForPhoneSince.mockResolvedValue({ total: 0, error: null });
+  // B5: the dup-check now runs inside create_withdrawal_guarded (0016), so
+  // this drives the same user-facing message via the RPC error-mapping path
+  // in initiateWithdrawal rather than the old JS pre-check (findPendingByWalletAndAmount).
   const { getActiveRate } = await import('../../src/repos/exchange-rates.js');
   getActiveRate.mockResolvedValue({ data: { rate: '25', created_at: new Date().toISOString() }, error: null });
-  findPendingByWalletAndAmount.mockResolvedValue({ data: { id: 'SECRET-UUID' }, error: null });
+  // The RPC never leaks the other withdrawal's id — it only ever raises
+  // 'DUPLICATE_OPEN_WITHDRAWAL' with no identifying data.
+  createWithdrawalRepo.mockResolvedValue({ data: null, error: { message: 'DUPLICATE_OPEN_WITHDRAWAL' } });
 
   const { initiateWithdrawal } = await import('../../src/routes/withdrawals/withdrawals.js');
 
