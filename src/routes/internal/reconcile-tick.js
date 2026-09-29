@@ -5,7 +5,8 @@ import { handleHeliusEvent } from '../webhooks/helius-handler.js';
 import { getTreasuryUsdcBalanceMinor } from '../../utils/solana.js';
 import {
   getRecentTreasurySignatures, hasProcessedSignature, getParsedTransfersForSignature,
-  getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys
+  getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys,
+  listCompletedWithoutJournal
 } from '../../repos/reconciliation.js';
 import { errorEnvelope } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
@@ -107,7 +108,39 @@ export async function cleanupIdempotencyKeys() {
 }
 
 /**
- * Run all four reconciliation passes. Each is wrapped independently — one
+ * Pass 5 — journal-presence sweep. Every completed deposit must carry both
+ * a `deposit_collection` and a `deposit_payout` ledger journal; every
+ * completed withdrawal must carry both `withdrawal_receipt` and
+ * `withdrawal_payout` (src/repos/ledger.js). `postJournal` never throws —
+ * a posting failure logs an alert and is swallowed so the money movement
+ * it describes is never blocked — which means a missing journal is
+ * otherwise a silent gap until someone happens to look. This pass does not
+ * attempt to backfill (posting a journal on an operator's behalf from a
+ * cron job is exactly the kind of blind write the ledger's append-only
+ * design is meant to prevent); it only surfaces the hole so an operator
+ * can investigate and backfill deliberately.
+ * @returns {Promise<{
+ *   deposits: {id: string, missing: string[]}[],
+ *   withdrawals: {id: string, missing: string[]}[]
+ * }>}
+ */
+export async function sweepMissingJournals() {
+  const { deposits, withdrawals } = await listCompletedWithoutJournal();
+  for (const { id, missing } of deposits) {
+    for (const kind of missing) {
+      logger.error({ alert: true }, `[Reconcile] ALERT MISSING_JOURNAL ${kind}:${id}`);
+    }
+  }
+  for (const { id, missing } of withdrawals) {
+    for (const kind of missing) {
+      logger.error({ alert: true }, `[Reconcile] ALERT MISSING_JOURNAL ${kind}:${id}`);
+    }
+  }
+  return { deposits, withdrawals };
+}
+
+/**
+ * Run all five reconciliation passes. Each is wrapped independently — one
  * pass throwing must never stop the others (e.g. an RPC outage killing the
  * missed-event sweep must not also prevent the balance proof or the stuck
  * sweep from running). A pass that throws logs an ALERT and its slot in the
@@ -119,7 +152,8 @@ export async function runReconcile() {
     ['sweepMissedEvents', sweepMissedEvents],
     ['proveBalance', proveBalance],
     ['sweepStuckRows', sweepStuckRows],
-    ['cleanupIdempotencyKeys', cleanupIdempotencyKeys]
+    ['cleanupIdempotencyKeys', cleanupIdempotencyKeys],
+    ['sweepMissingJournals', sweepMissingJournals]
   ];
 
   const results = {};

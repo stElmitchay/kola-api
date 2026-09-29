@@ -489,12 +489,8 @@ export function solanaMocks() {
       return { ok: true };
     }),
 
-    // Present so the wallets route and the treasury scripts resolve; never
-    // exercised by these specs.
-    deriveWalletFromPhone: jest.fn(),
-    getUsdcBalance: jest.fn(),
-    ensureTokenAccount: jest.fn(),
-    transferUsdc: jest.fn()
+    // Present so the wallets route resolves; never exercised by these specs.
+    getUsdcBalance: jest.fn()
   };
 
   return { mod, chain };

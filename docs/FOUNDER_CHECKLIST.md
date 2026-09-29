@@ -949,6 +949,44 @@ outstanding is deploying it and watching the first few live runs.
      already documents why the static bearer is an acceptable posture
      (the handler never trusts the payload's money claims; see that file).
 
+## Task C6 — apply 0020
+
+1. **Apply the RLS-lockdown + truncate-guard migration** (requires 0015's
+   `forbid_ledger_mutation()` — already applied under Task B4; extends
+   0009's deny-all posture to the eight tables 0013-0019 added):
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0020_lockdown_new_tables.sql
+   ```
+
+2. **Confirm RLS is enabled on all eight tables:**
+
+   ```sql
+   select relname from pg_class
+     where relrowsecurity
+       and relname in (
+         'webhook_events', 'transfer_jobs', 'ledger_accounts',
+         'ledger_journals', 'ledger_entries', 'unmatched_transfers',
+         'idempotency_keys', 'audit_log'
+       );
+   -- Expected: 8 rows
+   ```
+
+3. **Confirm the truncate guards landed:**
+
+   ```sql
+   select event_object_table, trigger_name from information_schema.triggers
+     where trigger_name in (
+       'trg_entries_no_truncate', 'trg_journals_no_truncate', 'trg_audit_no_truncate'
+     );
+   -- Expected: 3 rows, one per table (ledger_entries, ledger_journals, audit_log)
+
+   truncate ledger_entries;
+   -- Expected: ERROR: ledger is append-only
+   ```
+
 ## Task D1 — enable branch protection on main requiring the 'test' check
 
 1. **Turn on branch protection for `main`**: GitHub → the repo → Settings →
@@ -1030,18 +1068,38 @@ real database.
    `npm run test:integration` on a laptop without Docker exits 0 rather than
    dumping 25 connection errors).
 
-6. **Follow-up flagged by the suite (not a blocker).** The dual-racer fuzz
-   documents a real operational wart: when a manual `POST /:id/confirm`
-   wins the compare-and-swap, the losing Helius callback for the *same*
-   on-chain transfer no longer matches an open withdrawal and books that
-   transfer to `unmatched_transfers` + a `suspense_in` journal. No money is
-   lost or double-paid (the spec asserts every such row corresponds to a
-   withdrawal already in `processing`), but it raises a phantom suspense
-   item for an operator to chase. The fix is for the no-match path in
-   `src/routes/webhooks/helius-handler.js` to check whether the signature is
-   already recorded on a withdrawal or deposit — `hasProcessedSignature()`
-   in `src/repos/reconciliation.js` is exactly that query — before booking
-   to suspense.
+6. **Phantom-suspense fix — verify on first run, not an open defect.** The
+   dual-racer fuzz used to document a real operational wart: when a manual
+   `POST /:id/confirm` won the compare-and-swap, the losing Helius callback
+   for the *same* on-chain transfer no longer matched an open withdrawal and
+   booked that transfer to `unmatched_transfers` + a `suspense_in` journal —
+   a phantom suspense item for an operator to chase, even though no money
+   was lost or double-paid. **This is already fixed, not a follow-up item.**
+   The no-match path in `src/routes/webhooks/helius-handler.js` now calls
+   `hasProcessedSignature()` (`src/repos/reconciliation.js`) before booking
+   to suspense, so a losing delivery for a transfer the winning path already
+   accounted for is recognized and dropped instead of raising a phantom
+   case. Covered by unit tests (`__tests__/webhooks/helius-unmatched.test.js`)
+   and, at the integration level, by the dual-racer fuzz's strict
+   `unmatched_transfers` assertion in
+   `__tests__/integration/withdrawal-lifecycle.test.js` (`expect(unmatched).
+   toEqual([])` — every transfer either matches or is a genuine no-match
+   case, never a duplicate of an already-processed one). When this suite
+   runs for the first time against a real stack (step 2 above), re-confirm
+   that assertion still holds — it is the one thing that can only be proven
+   against a real database, not mocks.
+
+   **Founder note (separate, unrelated to the above):** aged `pending`
+   deposits are user abandonment (the user never completed the Monime
+   checkout/USSD flow), not a reconciliation gap — reconciliation only acts
+   on `confirmed`/`processing`/`received` rows (Task C1), and a `pending`
+   deposit with no webhook ever fired has nothing for it to find. These are
+   not swept automatically; review them periodically with:
+
+   ```sql
+   select id, created_at from deposits
+    where status = 'pending' and created_at < now() - interval '7 days';
+   ```
 
 ## Launch gate — run in this order
 
@@ -1057,7 +1115,7 @@ commands.
    incident — this is a launch blocker, not a nice-to-have, because you
    cannot provision it fast enough during an actual incident.
 
-2. **Apply migrations 0009–0019, in order, on a scratch/local project
+2. **Apply migrations 0009–0020, in order, on a scratch/local project
    first** — never the first apply of a new migration straight to
    production. Use the scratch stack from **Task D2** (`supabase start` +
    the explicit ordered `psql` apply in `docs/testing.md`, which also
@@ -1067,7 +1125,8 @@ commands.
    each migration's own apply/verify steps above: **Task A1** (0009),
    **Task A3** (0010), **Task A6** (0011), **Task B1** (0012), **Task B2**
    (0013), **Task B3** (0014), **Task B4** (0015), **Task B5** (0016),
-   **Task B6** (0017), **Task B7** (0018), **Task C2** (0019).
+   **Task B6** (0017), **Task B7** (0018), **Task C2** (0019), **Task C6**
+   (0020).
 
 3. **Task A2** — dump the real production schema baseline and diff it
    against what the migration chain produces; reconcile any drift from the

@@ -1,7 +1,6 @@
 import { jest } from '@jest/globals';
 
 const createWithdrawalRepo = jest.fn();
-const sumWithdrawalsForPhoneSince = jest.fn();
 const findPendingByWalletAndAmount = jest.fn();
 const getActiveRate = jest.fn();
 const assertRateFresh = jest.fn();
@@ -12,7 +11,6 @@ jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
   listWithdrawals: jest.fn(),
   updateWithdrawal: jest.fn(),
   updateWithdrawalIfStatus: jest.fn(),
-  sumWithdrawalsForPhoneSince,
   findPendingByWalletAndAmount
 }));
 jest.unstable_mockModule('../../src/utils/monime.js', () => ({ createPayout: jest.fn() }));
@@ -89,7 +87,6 @@ test('B5: initiateWithdrawal no longer calls the JS pre-check functions', async 
 
   await initiateWithdrawal(VALID_PARAMS);
 
-  expect(sumWithdrawalsForPhoneSince).not.toHaveBeenCalled();
   expect(findPendingByWalletAndAmount).not.toHaveBeenCalled();
 });
 

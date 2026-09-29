@@ -11,7 +11,7 @@ const createWithdrawalRepo = jest.fn();
 jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
   createWithdrawal: createWithdrawalRepo, getWithdrawal: getWithdrawalRepo,
   listWithdrawals: jest.fn(), updateWithdrawal, updateWithdrawalIfStatus,
-  sumWithdrawalsForPhoneSince: jest.fn(), findPendingByWalletAndAmount: jest.fn()
+  findPendingByWalletAndAmount: jest.fn()
 }));
 jest.unstable_mockModule('../../src/utils/monime.js', () => ({ createPayout }));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({

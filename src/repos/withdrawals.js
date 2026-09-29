@@ -178,26 +178,3 @@ export async function updateWithdrawal(id, updates) {
 
   return { data, error };
 }
-
-/**
- * Sum amount_usdc for non-failed/expired withdrawals on a phone since a given time.
- * Used to enforce the rolling 24h daily cap.
- * @param {string} phoneNumber
- * @param {string} application
- * @param {string} sinceIso
- * @returns {Promise<{ total: number, error: any }>}
- */
-export async function sumWithdrawalsForPhoneSince(phoneNumber, application, sinceIso) {
-  const { data, error } = await supabase
-    .from('withdrawals')
-    .select('amount_usdc')
-    .eq('phone_number', phoneNumber)
-    .eq('application', application)
-    .gte('created_at', sinceIso)
-    .not('status', 'in', '(failed,expired)');
-
-  if (error) return { total: 0, error };
-
-  const total = (data || []).reduce((sum, row) => sum + Number(row.amount_usdc), 0);
-  return { total, error: null };
-}

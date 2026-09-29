@@ -221,6 +221,72 @@ export async function listStaleInflight(thresholdMinutes) {
 }
 
 /**
+ * Completed deposits/withdrawals missing one of their two expected ledger
+ * journals: `deposit_collection`/`deposit_payout` for deposits,
+ * `withdrawal_receipt`/`withdrawal_payout` for withdrawals (src/repos/
+ * ledger.js). `postJournal` never throws — a posting failure logs an alert
+ * and is swallowed so the underlying money movement is never blocked
+ * (see that file) — which means a failed post is a silent gap unless
+ * something else looks for it later. This is that something else.
+ *
+ * PostgREST has no anti-join, so each resource type is two round trips:
+ * fetch the most recently updated `limit` completed rows, fetch which of
+ * their expected idempotency keys already have a `ledger_journals` row,
+ * and diff the two sets in JS.
+ * @param {number} [limit]
+ * @returns {Promise<{
+ *   deposits: {id: string, missing: string[]}[],
+ *   withdrawals: {id: string, missing: string[]}[]
+ * }>}
+ */
+export async function listCompletedWithoutJournal(limit = 200) {
+  const [deposits, withdrawals] = await Promise.all([
+    findMissingJournals('deposits', ['deposit_collection', 'deposit_payout'], limit),
+    findMissingJournals('withdrawals', ['withdrawal_receipt', 'withdrawal_payout'], limit)
+  ]);
+  return { deposits, withdrawals };
+}
+
+/**
+ * @param {string} table
+ * @param {string[]} kinds
+ * @param {number} limit
+ * @returns {Promise<{id: string, missing: string[]}[]>}
+ */
+async function findMissingJournals(table, kinds, limit) {
+  const { data: rows, error } = await supabase
+    .from(table)
+    .select('id')
+    .eq('status', 'completed')
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) {
+    logger.error({ alert: true }, `[Reconcile] ALERT: listCompletedWithoutJournal query failed for ${table}: ${error.message}`);
+    return [];
+  }
+  const ids = (rows || []).map((r) => r.id);
+  if (ids.length === 0) return [];
+
+  const expectedKeys = ids.flatMap((id) => kinds.map((kind) => `${kind}:${id}`));
+  const { data: journals, error: journalError } = await supabase
+    .from('ledger_journals')
+    .select('idempotency_key')
+    .in('idempotency_key', expectedKeys);
+  if (journalError) {
+    logger.error({ alert: true }, `[Reconcile] ALERT: listCompletedWithoutJournal journal lookup failed for ${table}: ${journalError.message}`);
+    return [];
+  }
+  const present = new Set((journals || []).map((j) => j.idempotency_key));
+
+  const holes = [];
+  for (const id of ids) {
+    const missing = kinds.filter((kind) => !present.has(`${kind}:${id}`));
+    if (missing.length > 0) holes.push({ id, missing });
+  }
+  return holes;
+}
+
+/**
  * Delete `idempotency_keys` rows older than 24h (housekeeping — B7 created
  * the table but left pruning for this task). Returns the number of rows
  * deleted; never throws (a failed cleanup is logged and treated as

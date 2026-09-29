@@ -36,18 +36,31 @@ function getRedis() {
   return redis;
 }
 
-/** @type {Map<number, Ratelimit>} */
+/** @type {Map<string, Ratelimit>} */
 const limiters = new Map();
 
+/**
+ * Keyed on `${UPSTASH_REDIS_REST_URL}|${perMinute}`, not just `perMinute` —
+ * a `Ratelimit` instance closes over whatever `Redis` client `getRedis()`
+ * returned at construction time. Keying on `perMinute` alone would keep
+ * serving requests through the OLD client forever on a warm instance:
+ * `getRedis()` already rebuilds its cached client when the URL/token env
+ * vars change (credential rotation), but a `Ratelimit` already cached here
+ * under the same `perMinute` would never be rebuilt to pick it up. Folding
+ * the URL into the cache key makes a rotation naturally mint a fresh
+ * `Ratelimit` (and therefore a fresh client) instead of only working after
+ * a cold start.
+ */
 function limiterFor(perMinute) {
-  if (!limiters.has(perMinute)) {
-    limiters.set(perMinute, new Ratelimit({
+  const key = `${process.env.UPSTASH_REDIS_REST_URL}|${perMinute}`;
+  if (!limiters.has(key)) {
+    limiters.set(key, new Ratelimit({
       redis: getRedis(),
       limiter: Ratelimit.slidingWindow(perMinute, '60 s'),
       prefix: `rl:${perMinute}`
     }));
   }
-  return limiters.get(perMinute);
+  return limiters.get(key);
 }
 
 /**

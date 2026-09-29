@@ -14,6 +14,7 @@ const getParsedTransfersForSignature = jest.fn();
 const getLedgerTreasuryBalanceMinor = jest.fn();
 const listStaleInflight = jest.fn();
 const deleteExpiredIdempotencyKeys = jest.fn();
+const listCompletedWithoutJournal = jest.fn();
 
 const getTreasuryUsdcBalanceMinor = jest.fn();
 const handleHeliusEvent = jest.fn();
@@ -21,7 +22,8 @@ const loggerError = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/reconciliation.js', () => ({
   getRecentTreasurySignatures, hasProcessedSignature, getParsedTransfersForSignature,
-  getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys
+  getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys,
+  listCompletedWithoutJournal
 }));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
   getTreasuryUsdcBalanceMinor
@@ -35,13 +37,13 @@ jest.unstable_mockModule('../../src/utils/logger.js', () => ({
 
 const {
   runReconcile, sweepMissedEvents, proveBalance, sweepStuckRows, cleanupIdempotencyKeys,
-  default: app
+  sweepMissingJournals, default: app
 } = await import('../../src/routes/internal/reconcile-tick.js');
 
 beforeEach(() => {
   jest.clearAllMocks();
   // Sensible no-op defaults so a test only overriding the mock it cares
-  // about doesn't also have to defend the other three passes.
+  // about doesn't also have to defend the other four passes.
   getRecentTreasurySignatures.mockResolvedValue([]);
   hasProcessedSignature.mockResolvedValue(true);
   getParsedTransfersForSignature.mockResolvedValue([]);
@@ -49,6 +51,7 @@ beforeEach(() => {
   getLedgerTreasuryBalanceMinor.mockResolvedValue(0n);
   listStaleInflight.mockResolvedValue([]);
   deleteExpiredIdempotencyKeys.mockResolvedValue(0);
+  listCompletedWithoutJournal.mockResolvedValue({ deposits: [], withdrawals: [] });
   handleHeliusEvent.mockResolvedValue({ ok: true });
 });
 
@@ -153,20 +156,59 @@ describe('pass 4 — housekeeping', () => {
   });
 });
 
+describe('pass 5 — journal-presence sweep', () => {
+  test('a completed deposit with only the collection key alerts on the missing payout key', async () => {
+    listCompletedWithoutJournal.mockResolvedValue({
+      deposits: [{ id: 'd-1', missing: ['deposit_payout'] }],
+      withdrawals: []
+    });
+
+    await runReconcile();
+
+    expect(loggerError).toHaveBeenCalledWith(
+      { alert: true },
+      '[Reconcile] ALERT MISSING_JOURNAL deposit_payout:d-1'
+    );
+  });
+
+  test('a clean case (both journals present) raises no alert', async () => {
+    listCompletedWithoutJournal.mockResolvedValue({ deposits: [], withdrawals: [] });
+
+    const result = await sweepMissingJournals();
+
+    expect(result).toEqual({ deposits: [], withdrawals: [] });
+    expect(loggerError.mock.calls.some((c) => String(c[1]).includes('MISSING_JOURNAL'))).toBe(false);
+  });
+
+  test('a completed withdrawal missing both keys alerts once per missing key', async () => {
+    listCompletedWithoutJournal.mockResolvedValue({
+      deposits: [],
+      withdrawals: [{ id: 'w-1', missing: ['withdrawal_receipt', 'withdrawal_payout'] }]
+    });
+
+    await sweepMissingJournals();
+
+    expect(loggerError).toHaveBeenCalledWith({ alert: true }, '[Reconcile] ALERT MISSING_JOURNAL withdrawal_receipt:w-1');
+    expect(loggerError).toHaveBeenCalledWith({ alert: true }, '[Reconcile] ALERT MISSING_JOURNAL withdrawal_payout:w-1');
+  });
+});
+
 describe('pass isolation', () => {
-  test('the first pass throwing does not stop the remaining three from running', async () => {
+  test('the first pass throwing does not stop the remaining four from running', async () => {
     getRecentTreasurySignatures.mockRejectedValue(new Error('RPC unreachable'));
 
     const results = await runReconcile();
 
     expect(results.sweepMissedEvents).toEqual({ ok: false, error: 'RPC unreachable' });
-    // The remaining three passes still ran despite pass 1 throwing.
+    // The remaining four passes still ran despite pass 1 throwing.
     expect(getTreasuryUsdcBalanceMinor).toHaveBeenCalledTimes(1);
     expect(listStaleInflight).toHaveBeenCalledTimes(1);
     expect(deleteExpiredIdempotencyKeys).toHaveBeenCalledTimes(1);
+    expect(listCompletedWithoutJournal).toHaveBeenCalledTimes(1);
     expect(results.proveBalance.ok).toBe(true);
     expect(results.sweepStuckRows.ok).toBe(true);
     expect(results.cleanupIdempotencyKeys.ok).toBe(true);
+    expect(results.sweepMissingJournals.ok).toBe(true);
     expect(loggerError).toHaveBeenCalledWith(
       { alert: true },
       expect.stringContaining('pass sweepMissedEvents threw')
@@ -190,6 +232,7 @@ describe('cron auth on POST /', () => {
     expect(body).toHaveProperty('proveBalance');
     expect(body).toHaveProperty('sweepStuckRows');
     expect(body).toHaveProperty('cleanupIdempotencyKeys');
+    expect(body).toHaveProperty('sweepMissingJournals');
   });
 
   test('rejects a wrong or missing secret', async () => {

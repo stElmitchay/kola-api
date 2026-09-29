@@ -32,7 +32,7 @@ Or via the admin API:
 
 ```bash
 curl -s "$API_BASE_URL/api/v1/admin/unmatched-transfers?status=open" \
-  -H "X-Admin-Secret: $ADMIN_SECRET_KEY"
+  -H "X-Admin-Key: $ADMIN_KEY_SECRET"   # one operator's secret half of an ADMIN_KEYS "name:secret" pair
 ```
 
 For one specific case, note its `id`, `signature`, `from_wallet`, and
