@@ -8,5 +8,7 @@ docs/*
 !docs/FOUNDER_CHECKLIST.md
 !docs/fixtures/
 !docs/fixtures/**
+!docs/runbooks/
+!docs/runbooks/**
 .DS_Store
 .vercel

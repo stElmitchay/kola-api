@@ -1,12 +1,14 @@
 //@ts-check
 
+import BigNumber from 'bignumber.js';
 import { getTreasuryAddress } from '../../utils/solana.js';
 import {
   findPendingByWalletAndAmount,
   updateWithdrawalIfStatus
 } from '../../repos/withdrawals.js';
 import { triggerPayoutForWithdrawal } from '../withdrawals/withdrawals.js';
-import { postWithdrawalReceipt } from '../../repos/ledger.js';
+import { postWithdrawalReceipt, postJournal } from '../../repos/ledger.js';
+import { recordUnmatched } from '../../repos/unmatched-transfers.js';
 
 /**
  * Process a batch of Helius Enhanced Webhook events. For every USDC token
@@ -37,20 +39,47 @@ export async function handleHeliusEvent(events) {
       if (t?.toUserAccount !== treasury) continue;
 
       const fromWallet = t.fromUserAccount;
-      // Helius gives tokenAmount as a human-readable number; USDC has 6 decimals.
-      const amountMinorUnits = Math.round(Number(t.tokenAmount) * 1_000_000);
+      // Helius gives tokenAmount as a human-readable number; USDC has 6
+      // decimals. Prefer the raw integer string when present (exact — no
+      // float involved); fall back to exact BigNumber string math on
+      // tokenAmount, never plain float multiplication (F18).
+      // ASSUMPTION(V-D-adjacent): verify against docs/fixtures/helius/ — fixture wins
+      const amountMinorUnits = t.rawTokenAmount?.tokenAmount != null
+        ? Number(t.rawTokenAmount.tokenAmount)   // integer string from Helius — exact
+        : new BigNumber(String(t.tokenAmount)).multipliedBy(1_000_000).integerValue(BigNumber.ROUND_HALF_UP).toNumber();
       if (!fromWallet || !Number.isFinite(amountMinorUnits)) continue;
 
       const { data: w, error: findErr } = await findPendingByWalletAndAmount(
         fromWallet,
         amountMinorUnits
       );
-      if (findErr) {
-        console.error(`[Helius] Lookup failed for from=${fromWallet} amount=${amountMinorUnits}: ${findErr.message}`);
-        continue;
-      }
-      if (!w) {
-        console.log(`[Helius] No matching open withdrawal for from=${fromWallet} amount=${amountMinorUnits} sig=${ev.signature}`);
+      if (findErr || !w) {
+        const reason = findErr ? 'lookup_error' : 'no_open_match';
+        if (findErr) {
+          console.error(`[Helius] Lookup failed for from=${fromWallet} amount=${amountMinorUnits}: ${findErr.message}`);
+        } else {
+          console.log(`[Helius] No matching open withdrawal for from=${fromWallet} amount=${amountMinorUnits} sig=${ev.signature}`);
+        }
+
+        const { data: booked, error: recordErr } = await recordUnmatched({
+          signature: ev.signature, from_wallet: fromWallet,
+          amount_usdc: amountMinorUnits, reason
+        });
+        if (recordErr) {
+          console.error(`[Helius] Failed to record unmatched transfer sig=${ev.signature}: ${recordErr.message}`);
+          continue;
+        }
+        if (booked) {   // unique(signature) makes replays no-ops
+          await postJournal('suspense_in', {
+            resourceType: 'unmatched_transfer', resourceId: booked.id,
+            idempotencyKey: `suspense_in:${ev.signature}`,
+            entries: [
+              { account: 'treasury_usdc', direction: 'debit',  amount: amountMinorUnits },
+              { account: 'suspense_usdc', direction: 'credit', amount: amountMinorUnits }
+            ]
+          });
+          console.error(`[Helius] UNMATCHED transfer booked to suspense sig=${ev.signature}`); // C4: paged alert
+        }
         continue;
       }
 
