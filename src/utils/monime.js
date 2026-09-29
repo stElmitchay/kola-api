@@ -25,11 +25,22 @@ async function monimeRequest(method, path, body, idempotencyKey) {
     headers['Idempotency-Key'] = idempotencyKey;
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
+  const timeoutMs = parseInt(process.env.MONIME_TIMEOUT_MS || '15000', 10);
+
+  let response;
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw createMonimeError(`Monime request timed out after ${timeoutMs}ms — outcome unknown, do not assume failure`);
+    }
+    throw err;
+  }
 
   const data = await response.json();
 
