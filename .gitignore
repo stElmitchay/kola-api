@@ -10,5 +10,7 @@ docs/*
 !docs/fixtures/**
 !docs/runbooks/
 !docs/runbooks/**
+!docs/decisions/
+!docs/decisions/**
 .DS_Store
 .vercel

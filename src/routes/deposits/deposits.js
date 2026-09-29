@@ -2,7 +2,7 @@
 
 import BigNumber from 'bignumber.js';
 import { validatePhoneNumber } from '../../utils/validation.js';
-import { deriveWalletFromPhone, getTreasuryUsdcBalanceMinor } from '../../utils/solana.js';
+import { getTreasuryUsdcBalanceMinor } from '../../utils/solana.js';
 import { createCheckoutSession, createPaymentCode } from '../../utils/monime.js';
 import {
   createDeposit as createDepositRepo,
@@ -11,7 +11,6 @@ import {
   updateDeposit
 } from '../../repos/deposits.js';
 import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
-import { getWalletByPhone, createWallet } from '../../repos/wallets.js';
 import {
   createValidationError,
   createNotFoundError,
@@ -43,31 +42,13 @@ function calculateUsdcAmount(amountSleMinor, rate) {
 }
 
 /**
- * Resolve wallet address — use provided or derive from phone number
- * @param {string | undefined} walletAddress
- * @param {string} phoneNumber
- * @param {string} application
- * @returns {Promise<{ address: string, type: 'provided' | 'derived' }>}
+ * Resolve wallet address — walletAddress is required (F4: derived wallets
+ * have no private key, so USDC sent to them is permanently unspendable).
+ * @param {string} walletAddress
+ * @returns {{ address: string, type: 'provided' }}
  */
-async function resolveWalletAddress(walletAddress, phoneNumber, application) {
-  if (walletAddress) {
-    return { address: walletAddress, type: 'provided' };
-  }
-
-  const { data: existing } = await getWalletByPhone(phoneNumber, application);
-  if (existing) {
-    return { address: existing.wallet_address, type: 'derived' };
-  }
-
-  const { address } = await deriveWalletFromPhone(phoneNumber);
-
-  await createWallet({
-    phone_number: phoneNumber,
-    wallet_address: address,
-    application
-  });
-
-  return { address, type: 'derived' };
+function resolveWalletAddress(walletAddress) {
+  return { address: walletAddress, type: 'provided' };
 }
 
 /**
@@ -77,7 +58,7 @@ async function resolveWalletAddress(walletAddress, phoneNumber, application) {
  * @param {string} params.currency
  * @param {string} params.paymentMethod
  * @param {string} params.phoneNumber
- * @param {string} [params.walletAddress]
+ * @param {string} params.walletAddress
  * @param {string} [params.successUrl]
  * @param {string} [params.cancelUrl]
  * @param {object} [params.metadata]
@@ -118,11 +99,7 @@ export async function initiateDeposit(params) {
     throw createValidationError('Deposits are temporarily unavailable. Please try again later.');
   }
 
-  const wallet = await resolveWalletAddress(
-    params.walletAddress,
-    normalized,
-    params.application
-  );
+  const wallet = resolveWalletAddress(params.walletAddress);
 
   const { data: deposit, error: depositError } = await createDepositRepo({
     application: params.application,

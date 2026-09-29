@@ -1,3 +1,19 @@
+## Breaking changes pending client updates
+
+- **`walletAddress` is now required on `POST /v1/deposits`** (task B8, F4).
+  Previously, an omitted `walletAddress` silently fell back to a
+  phone-derived address with no private key — any USDC sent there was
+  permanently unspendable. kola-app must collect a wallet address before
+  calling this endpoint; its deposit flow already has the input field used
+  for the `provided` path, so this should be a matter of always sending it
+  rather than building new UI. Coordinate the client-side rollout with
+  kola-app before this deploys to production, since a client still omitting
+  `walletAddress` will now get a `400` instead of a derived wallet.
+- **`POST /v1/wallets/derive` now returns `410 Gone`** with
+  `{ "error": "Derived wallets are discontinued. Supply walletAddress on deposit." }`.
+  Any client still calling this endpoint must be updated to stop calling it.
+  `GET /v1/wallets/:address/balance` is unaffected and still works.
+
 # Founder checklist — live infrastructure steps
 
 This checklist covers the steps in the production-hardening plan that
@@ -668,3 +684,39 @@ steps to actually apply and verify them against production.
 
 4. **Wire the >24h cleanup into C1's cron** when that task lands — this
    task only creates the table; nothing currently prunes old rows.
+
+## Task B8 — run stranded-funds audit against mainnet
+
+`POST /v1/deposits` now requires a real `walletAddress` and
+`POST /v1/wallets/derive` returns `410 Gone` — this closes finding F4 (a
+phone-derived address has no private key, so USDC sent to it is
+permanently unspendable) going forward. What's still unknown is whether any
+*existing* `derived_wallets` rows already received USDC before this landed.
+
+1. **Run the audit script** against production (read-only; does not touch
+   any tables):
+
+   ```bash
+   node --env-file=.env scripts/audit-derived-wallets.js
+   ```
+
+   It lists every row in `derived_wallets` with its wallet address and
+   on-chain USDC ATA balance, then prints a `TOTAL LOCKED` figure in minor
+   units and USDC.
+
+2. **If `TOTAL LOCKED` is `0`:** nothing is stranded — no further action,
+   note the result (and the date run) in
+   `docs/incidents/2026-09-open-db-review.md` for the record.
+
+3. **If `TOTAL LOCKED > 0`:** that amount is real customer money that is
+   **not recoverable** — there is no private key for these addresses, on
+   Solana or anywhere else.
+   - Record the full script output and the total in
+     `docs/incidents/2026-09-open-db-review.md` as a loss.
+   - Once migration `0015` (the ledger, task B4) is applied, post an
+     `adjustment` journal for the locked amount so the ledger reflects the
+     loss rather than silently understating it — see `src/repos/ledger.js`
+     for the posting helpers. Do not attempt any code path that tries to
+     "recover" or re-derive these funds; the decision record
+     (`docs/decisions/0001-derived-wallets.md`) exists precisely because
+     this path is closed.
