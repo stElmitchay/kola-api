@@ -39,11 +39,13 @@ beforeEach(() => {
   process.env.ADMIN_KEYS = 'mitchel:mitchel-secret,ops2:ops2-secret';
   process.env.ADMIN_SECRET_KEY = 'legacy-secret';
   process.env.RATE_MAX_MOVE_BPS = '500';
+  process.env.API_KEY_SALT = 'test-api-key-salt';
 });
 
 afterEach(() => {
   delete process.env.ADMIN_KEYS;
   delete process.env.ADMIN_SECRET_KEY;
+  delete process.env.API_KEY_SALT;
 });
 
 test('named admin key "mitchel" authenticates and rate.set audit row carries actor + before/after rates', async () => {
@@ -114,6 +116,57 @@ test('DELETE /api-keys/:id writes an api_key.deactivate audit row and never logs
     resourceId: 'key-1'
   }));
   const auditCall = writeAudit.mock.calls[0][0];
+  expect(JSON.stringify(auditCall)).not.toMatch(/super-secret-hash-must-not-leak/);
+});
+
+test('POST /api-keys strips key_hash from both the audit payload and the HTTP response, and returns the raw apiKey once', async () => {
+  createApiKey.mockResolvedValue({
+    data: {
+      id: 'key-1',
+      client_id: 'client-1',
+      key_hash: 'super-secret-hash-must-not-leak',
+      name: 'Acme',
+      business_name: 'Acme Inc',
+      app_name: 'Acme App',
+      is_active: true,
+      expires_at: null,
+      created_at: new Date().toISOString()
+    },
+    error: null
+  });
+
+  const res = await adminApp.request('/api-keys', {
+    method: 'POST',
+    headers: {
+      'X-Admin-Key': 'mitchel-secret',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: 'Acme',
+      businessName: 'Acme Inc',
+      appName: 'Acme App'
+    })
+  });
+
+  expect(res.status).toBe(201);
+  const body = await res.json();
+
+  // the raw key is returned exactly once, at the top level
+  expect(typeof body.apiKey).toBe('string');
+  expect(body.apiKey.startsWith('kola_')).toBe(true);
+
+  // the created-record echo must never carry the hash
+  expect(body.application).not.toHaveProperty('key_hash');
+  expect(body.application.id).toBe('key-1');
+  expect(JSON.stringify(body)).not.toMatch(/super-secret-hash-must-not-leak/);
+
+  expect(writeAudit).toHaveBeenCalledWith(expect.objectContaining({
+    actor: 'mitchel',
+    action: 'api_key.create',
+    resourceId: 'key-1'
+  }));
+  const auditCall = writeAudit.mock.calls[0][0];
+  expect(auditCall.after).not.toHaveProperty('key_hash');
   expect(JSON.stringify(auditCall)).not.toMatch(/super-secret-hash-must-not-leak/);
 });
 
