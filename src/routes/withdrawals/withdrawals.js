@@ -119,8 +119,8 @@ export async function initiateWithdrawal(params) {
   );
   if (openDup) {
     throw createValidationError(
-      `An open withdrawal already exists for this wallet and amount ` +
-      `(id: ${openDup.id}). Complete or wait for it to expire before creating another.`
+      'An open withdrawal already exists for this wallet and amount. ' +
+      'Complete it or wait for it to expire, or withdraw a slightly different amount.'
     );
   }
 
@@ -189,7 +189,9 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
   // Skip expiry + on-chain verification when retrying — we've already done that work
   if (!isPayoutRetry) {
     if (new Date(withdrawal.expires_at).getTime() < Date.now()) {
-      await updateWithdrawal(id, { status: 'expired' });
+      // CAS: only expire a row that is still pending. If Helius claimed it
+      // between our read and now, the claim wins and this confirm is a no-op.
+      await updateWithdrawalIfStatus(id, 'pending_deposit', { status: 'expired' });
       throw createValidationError('Withdrawal has expired');
     }
 
@@ -220,20 +222,20 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
     workingRow = claimed;
   }
 
-  await triggerPayoutForWithdrawal(workingRow);
+  await triggerPayoutForWithdrawal(workingRow, isPayoutRetry ? 'failed' : 'received');
 
   return getWithdrawalStatus(id, application);
 }
 
 /**
- * Fire the Monime payout for a withdrawal whose USDC has been verified on-chain.
- * On success advances the row to 'processing' and records monime_payout_id.
- * On failure writes 'failed' + failure_reason and rethrows so the caller can
- * decide whether to surface the error (manual confirm: yes, webhook: swallow + 200).
- *
+ * Fire the Monime payout for a withdrawal whose USDC has been verified.
+ * All status writes are CAS from expectedStatus so a racing completion
+ * webhook can never be overwritten (F8): if the CAS loses, we keep the
+ * webhook's status and only backfill monime_payout_id for the audit trail.
  * @param {object} withdrawal
+ * @param {string} [expectedStatus] - 'received' normally, 'failed' on the retry path
  */
-export async function triggerPayoutForWithdrawal(withdrawal) {
+export async function triggerPayoutForWithdrawal(withdrawal, expectedStatus = 'received') {
   try {
     const payout = await createPayout({
       withdrawalId: withdrawal.id,
@@ -243,13 +245,16 @@ export async function triggerPayoutForWithdrawal(withdrawal) {
       metadata: { withdrawal_id: withdrawal.id }
     });
 
-    await updateWithdrawal(withdrawal.id, {
+    const { data: advanced } = await updateWithdrawalIfStatus(withdrawal.id, expectedStatus, {
       status: 'processing',
       monime_payout_id: payout.id,
       failure_reason: null
     });
+    if (!advanced) {
+      await updateWithdrawal(withdrawal.id, { monime_payout_id: payout.id });
+    }
   } catch (payoutError) {
-    await updateWithdrawal(withdrawal.id, {
+    await updateWithdrawalIfStatus(withdrawal.id, expectedStatus, {
       status: 'failed',
       failure_reason: `Monime payout failed: ${payoutError.message}`
     });
