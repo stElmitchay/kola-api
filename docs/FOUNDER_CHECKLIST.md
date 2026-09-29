@@ -151,3 +151,22 @@ steps to actually apply and verify them against production.
    deploys; the code falls back to 1440 / 500 if unset, but an explicit
    value avoids surprise operator friction on the first rate change
    after go-live.
+
+## Task B1 — apply migration 0012 + run transition verification
+
+1. **Apply the state-machine migration** (after unpausing the project if it's
+   paused):
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0012_state_machines.sql
+   ```
+
+2. **Verify the state-machine constraints** by running the three SQL
+   statements in `__tests__/db/state-machine.sql.test.md` against a
+   scratch Postgres instance (or local via `supabase db reset`). Record
+   the output in that file's TODO block:
+   - First two UPDATEs must fail with `ILLEGAL_DEPOSIT_TRANSITION` and
+     `ILLEGAL_WITHDRAWAL_TRANSITION` errors.
+   - Third UPDATE must succeed (legal `pending → processing` transition).
