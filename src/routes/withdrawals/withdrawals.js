@@ -9,9 +9,7 @@ import {
   getWithdrawal as getWithdrawalRepo,
   listWithdrawals as listWithdrawalsRepo,
   updateWithdrawal,
-  updateWithdrawalIfStatus,
-  sumWithdrawalsForPhoneSince,
-  findPendingByWalletAndAmount
+  updateWithdrawalIfStatus
 } from '../../repos/withdrawals.js';
 import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
 import { postWithdrawalReceipt } from '../../repos/ledger.js';
@@ -89,22 +87,6 @@ export async function initiateWithdrawal(params) {
     throw createValidationError(`Amount exceeds maximum (${maxUsdc} minor units / ${(maxUsdc / 1_000_000).toFixed(2)} USDC)`);
   }
 
-  // Daily rolling cap per phone
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { total, error: capError } = await sumWithdrawalsForPhoneSince(
-    normalized,
-    params.application,
-    since
-  );
-  if (capError) {
-    throw createDatabaseError(`Failed to check daily cap: ${capError.message}`);
-  }
-  if (total + params.amountUsdc > dailyCap) {
-    throw createValidationError(
-      `Daily withdrawal cap of ${(dailyCap / 1_000_000).toFixed(2)} USDC would be exceeded (already used ${(total / 1_000_000).toFixed(2)} USDC in last 24h)`
-    );
-  }
-
   // Rate + fee
   const { data: rateData, error: rateError } = await getActiveRate(params.application);
   if (rateError || !rateData) {
@@ -119,22 +101,12 @@ export async function initiateWithdrawal(params) {
     throw createValidationError('Amount too small to produce any SLE after fee');
   }
 
-  // Refuse a duplicate while one is still open. Keeps the (wallet, amount)
-  // pair unambiguous so the Helius auto-confirm handler can match an incoming
-  // USDC transfer to exactly one withdrawal.
-  const { data: openDup } = await findPendingByWalletAndAmount(
-    params.fromWalletAddress,
-    params.amountUsdc
-  );
-  if (openDup) {
-    throw createValidationError(
-      'An open withdrawal already exists for this wallet and amount. ' +
-      'Complete it or wait for it to expire, or withdraw a slightly different amount.'
-    );
-  }
-
   const expiresAt = new Date(Date.now() + WITHDRAWAL_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
+  // Daily-cap sum, the (wallet, amount) duplicate-open check, and the insert
+  // itself all run inside create_withdrawal_guarded under a per-phone
+  // advisory lock (migration 0016), so concurrent creates can no longer
+  // both pass either check (F10 — TOCTOU).
   const { data: withdrawal, error: insertError } = await createWithdrawalRepo({
     application: params.application,
     phone_number: normalized,
@@ -147,10 +119,24 @@ export async function initiateWithdrawal(params) {
     exchange_rate: rateData.rate,
     expires_at: expiresAt,
     metadata: params.metadata || {}
-  });
+  }, dailyCap);
 
   if (insertError || !withdrawal) {
-    throw createDatabaseError(`Failed to create withdrawal: ${insertError?.message}`);
+    const message = insertError?.message || '';
+    const capMatch = message.match(/DAILY_CAP_EXCEEDED used=(\d+)/);
+    if (capMatch) {
+      const used = Number(capMatch[1]);
+      throw createValidationError(
+        `Daily withdrawal cap of ${(dailyCap / 1_000_000).toFixed(2)} USDC would be exceeded (already used ${(used / 1_000_000).toFixed(2)} USDC in last 24h)`
+      );
+    }
+    if (message.includes('DUPLICATE_OPEN_WITHDRAWAL')) {
+      throw createValidationError(
+        'An open withdrawal already exists for this wallet and amount. ' +
+        'Complete it or wait for it to expire, or withdraw a slightly different amount.'
+      );
+    }
+    throw createDatabaseError(`Failed to create withdrawal: ${message}`);
   }
 
   return {

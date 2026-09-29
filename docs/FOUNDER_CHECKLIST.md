@@ -408,3 +408,137 @@ steps to actually apply and verify them against production.
    pre-existing rows found here are expected and already logged via
    `console.error` at posting time — no action required unless an operator
    wants to manually backfill their SLE-side ledger entries.
+
+## Task B5 — apply 0016 + concurrency proof
+
+1. **Apply the guarded-withdrawal migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0016_guarded_withdrawal.sql
+   ```
+
+2. **Confirm the function landed and is locked down to the service role:**
+
+   ```sql
+   select proname from pg_proc where proname = 'create_withdrawal_guarded';
+   -- Expected: 1 row
+
+   select has_function_privilege('anon', 'create_withdrawal_guarded(jsonb,bigint)', 'execute');
+   select has_function_privilege('authenticated', 'create_withdrawal_guarded(jsonb,bigint)', 'execute');
+   -- Expected: both false
+   ```
+
+3. **Concurrency proof — 10 parallel creates at cap−1 remaining, exactly one
+   succeeds.** There is no local Postgres in this environment, so this has to
+   be run by hand against a real (devnet-pointed) Supabase project with the
+   service-role key. It talks to the database directly via the RPC — no live
+   Solana or Monime calls happen, so it's safe to run repeatedly.
+
+   Save as `scripts/b5-concurrency-proof.mjs`:
+
+   ```js
+   // One-off founder verification for F10 (TOCTOU). Not part of the app —
+   // delete after running, or leave under scripts/ since it's inert without
+   // being invoked directly.
+   import { createClient } from '@supabase/supabase-js';
+
+   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+     auth: { persistSession: false, autoRefreshToken: false }
+   });
+
+   const APPLICATION = process.env.B5_PROOF_APPLICATION; // an existing application uuid, test app preferred
+   const PHONE = '+23276000999'; // throwaway phone, not used elsewhere
+   const WALLET_PREFIX = 'B5PROOF';
+   const DAILY_CAP = 500_000_000; // must match WITHDRAWAL_DAILY_CAP_USDC (or the deployed default)
+   const ATTEMPT_AMOUNT = 50_000_000; // 50 USDC per attempt
+   const SEED_USED = DAILY_CAP - ATTEMPT_AMOUNT; // leaves room for exactly ONE attempt to fit
+
+   function baseWithdrawal(i) {
+     const now = new Date();
+     return {
+       application: APPLICATION,
+       phone_number: PHONE,
+       from_wallet_address: `${WALLET_PREFIX}${String(i).padStart(37, '0')}`, // unique per attempt, 44 chars
+       provider_code: 'm17',
+       amount_usdc: ATTEMPT_AMOUNT,
+       amount_sle: 1,
+       amount_sle_gross: 1,
+       fee_bps: 100,
+       exchange_rate: '25',
+       expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+       metadata: { b5_concurrency_proof: true }
+     };
+   }
+
+   async function main() {
+     if (!APPLICATION) throw new Error('Set B5_PROOF_APPLICATION to a real application uuid');
+
+     // 1. Clean up any leftovers from a previous run.
+     await supabase.from('withdrawals').delete().eq('phone_number', PHONE);
+
+     // 2. Seed prior usage so only ATTEMPT_AMOUNT of headroom remains under the cap.
+     const { error: seedErr } = await supabase.from('withdrawals').insert({
+       application: APPLICATION,
+       phone_number: PHONE,
+       from_wallet_address: `${WALLET_PREFIX}SEED`.padEnd(44, '0'),
+       provider_code: 'm17',
+       amount_usdc: SEED_USED,
+       amount_sle: 1,
+       amount_sle_gross: 1,
+       fee_bps: 100,
+       exchange_rate: '25',
+       status: 'received', // counts toward the cap (NOT IN ('failed','expired'))
+       expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+     });
+     if (seedErr) throw seedErr;
+
+     // 3. Fire 10 parallel create_withdrawal_guarded calls for the same phone.
+     const results = await Promise.allSettled(
+       Array.from({ length: 10 }, (_, i) =>
+         supabase.rpc('create_withdrawal_guarded', { p: baseWithdrawal(i), p_daily_cap: DAILY_CAP })
+       )
+     );
+
+     const outcomes = results.map((r, i) => {
+       if (r.status === 'rejected') return { i, ok: false, reason: String(r.reason) };
+       const { data, error } = r.value;
+       return { i, ok: !error && !!data, reason: error?.message ?? null };
+     });
+
+     const successes = outcomes.filter(o => o.ok);
+     const capFailures = outcomes.filter(o => !o.ok && /DAILY_CAP_EXCEEDED/.test(o.reason || ''));
+
+     console.log(JSON.stringify(outcomes, null, 2));
+     console.log(`successes=${successes.length} capFailures=${capFailures.length}`);
+     console.log(
+       successes.length === 1 && capFailures.length === 9
+         ? 'PASS: exactly one create succeeded, nine hit DAILY_CAP_EXCEEDED'
+         : 'FAIL: expected exactly 1 success and 9 DAILY_CAP_EXCEEDED failures — investigate before shipping'
+     );
+
+     // 4. Clean up.
+     await supabase.from('withdrawals').delete().eq('phone_number', PHONE);
+   }
+
+   main().catch((err) => { console.error(err); process.exit(1); });
+   ```
+
+   Run it:
+
+   ```bash
+   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... B5_PROOF_APPLICATION=<test-app-uuid> \
+     node scripts/b5-concurrency-proof.mjs
+   ```
+
+   Expected output: `successes=1 capFailures=9` and the `PASS` line. Paste the
+   full JSON transcript here once run:
+
+   ```
+   <paste the script's JSON output + PASS/FAIL line here>
+   ```
+
+   If it ever prints more than one success, the advisory lock isn't
+   serialising creates for the phone — stop and re-check that migration 0016
+   applied cleanly (step 2) before shipping withdrawals traffic.
