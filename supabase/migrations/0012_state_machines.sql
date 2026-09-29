@@ -28,7 +28,7 @@ BEGIN
   IF OLD.status = NEW.status THEN RETURN NEW; END IF;
   IF NOT (
     (OLD.status = 'pending_deposit' AND NEW.status IN ('received','expired')) OR
-    (OLD.status = 'received'        AND NEW.status IN ('processing','failed')) OR
+    (OLD.status = 'received'        AND NEW.status IN ('processing','failed','completed')) OR -- 'completed' direct from 'received': payout.completed webhook may win the race against the received->processing CAS (F8)
     (OLD.status = 'processing'      AND NEW.status IN ('completed','failed')) OR
     (OLD.status = 'failed'          AND NEW.status IN ('processing'))   -- payout retry path
   ) THEN
