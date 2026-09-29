@@ -9,6 +9,7 @@ const triggerPayoutForWithdrawal = jest.fn();
 const postWithdrawalReceipt = jest.fn();
 const postJournal = jest.fn();
 const recordUnmatched = jest.fn();
+const hasProcessedSignature = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
   getTreasuryAddress
@@ -24,6 +25,9 @@ jest.unstable_mockModule('../../src/repos/ledger.js', () => ({
 }));
 jest.unstable_mockModule('../../src/repos/unmatched-transfers.js', () => ({
   recordUnmatched
+}));
+jest.unstable_mockModule('../../src/repos/reconciliation.js', () => ({
+  hasProcessedSignature
 }));
 
 const { handleHeliusEvent } = await import('../../src/routes/webhooks/helius-handler.js');
@@ -42,6 +46,10 @@ function transferEvent({ signature = 'SIG-X', fromUserAccount = 'SENDER', ...tra
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Default: this signature has not been seen anywhere else, so the
+  // suspense-booking path below is reachable. The skip path is covered by
+  // its own test.
+  hasProcessedSignature.mockResolvedValue(false);
 });
 
 test('inbound USDC with no open withdrawal is booked to suspense, not dropped', async () => {
@@ -65,6 +73,45 @@ test('inbound USDC with no open withdrawal is booked to suspense, not dropped', 
       { account: 'suspense_usdc', direction: 'credit', amount: 5_000_000 }
     ]
   });
+});
+
+test('an already-processed signature is NOT booked to suspense (manual confirm won the race)', async () => {
+  // The manual POST /:id/confirm won the pending_deposit -> received CAS for
+  // this exact transfer, so the row is no longer open and the (wallet,
+  // amount) lookup finds nothing — but the money is fully credited and
+  // `withdrawals.solana_tx_signature` already holds the signature. Booking it
+  // to suspense would double-debit treasury_usdc.
+  findPendingByWalletAndAmount.mockResolvedValue({ data: null, error: null });
+  hasProcessedSignature.mockResolvedValue(true);
+
+  await expect(handleHeliusEvent(transferEvent({
+    signature: 'SIG-ALREADY-CONFIRMED',
+    fromUserAccount: 'SENDER',
+    rawTokenAmount: { tokenAmount: '5000000', decimals: 6 }
+  }))).resolves.toEqual({ ok: true });
+
+  expect(hasProcessedSignature).toHaveBeenCalledWith('SIG-ALREADY-CONFIRMED');
+  expect(recordUnmatched).not.toHaveBeenCalled();
+  expect(postJournal).not.toHaveBeenCalled();
+});
+
+test('a hasProcessedSignature failure books anyway — inbound USDC is never dropped', async () => {
+  findPendingByWalletAndAmount.mockResolvedValue({ data: null, error: null });
+  hasProcessedSignature.mockRejectedValue(new Error('db down'));
+  recordUnmatched.mockResolvedValue({ data: { id: 'ut-5' }, error: null });
+
+  await expect(handleHeliusEvent(transferEvent({
+    signature: 'SIG-CHECK-FAILED',
+    fromUserAccount: 'SENDER',
+    rawTokenAmount: { tokenAmount: '5000000', decimals: 6 }
+  }))).resolves.toEqual({ ok: true });
+
+  expect(recordUnmatched).toHaveBeenCalledWith(expect.objectContaining({
+    signature: 'SIG-CHECK-FAILED'
+  }));
+  expect(postJournal).toHaveBeenCalledWith('suspense_in', expect.objectContaining({
+    resourceId: 'ut-5'
+  }));
 });
 
 test('a lookup error is booked to suspense with reason lookup_error', async () => {

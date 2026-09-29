@@ -263,25 +263,23 @@ describeIntegration('withdrawal lifecycle (real Postgres)', () => {
     }
     expect(await journalImbalances()).toEqual([]);
 
-    // Suspense bookkeeping. When the MANUAL confirm wins the CAS, the losing
-    // Helius delivery no longer sees an open withdrawal for
-    // (wallet, amount) and books the transfer to suspense (0017 + F11) —
-    // by design it never drops inbound USDC it cannot match. That makes some
-    // suspense rows here expected rather than a failure, but every one of
-    // them must be a DUPLICATE booking of a transfer that was already
-    // credited: its signature must belong to a withdrawal now in
-    // 'processing'. No suspense row may ever exist for money that was not
-    // otherwise accounted for.
+    // ZERO suspense rows. Every one of these transfers was matched and
+    // credited, so none of them is orphaned money.
+    //
+    // This is the assertion that pins the D2-review fix. When the MANUAL
+    // confirm wins the CAS, the losing Helius delivery no longer finds an
+    // open withdrawal for (wallet, amount) — and before the fix it booked
+    // that already-credited transfer to `unmatched_transfers` + a
+    // `suspense_in` journal, double-debiting `treasury_usdc` (which corrupts
+    // C1's balance proof) and raising a phantom suspense item. The handler
+    // now consults `hasProcessedSignature(ev.signature)` first, which is
+    // sound here precisely because of the ordering: the confirm writes
+    // `status` and `solana_tx_signature` in ONE update, so any delivery that
+    // sees no open row is necessarily looking at a database where the
+    // signature is already committed.
     const { data: unmatched } = await serviceClient()
       .from('unmatched_transfers').select('id, signature, amount_usdc');
-    const knownSignatures = new Map(final.map((row) => [row.solana_tx_signature, row]));
-    for (const row of unmatched || []) {
-      const withdrawal = knownSignatures.get(row.signature);
-      expect(withdrawal).toBeDefined();
-      expect(withdrawal.status).toBe('processing');
-      expect(Number(row.amount_usdc)).toBe(AMOUNT_USDC_MINOR);
-    }
-    expect((unmatched || []).length).toBeLessThanOrEqual(FUZZ_ROUNDS);
+    expect(unmatched).toEqual([]);
   }, 180_000);
 
   test('inbound USDC with no matching withdrawal books to suspense exactly once', async () => {
@@ -291,7 +289,10 @@ describeIntegration('withdrawal lifecycle (real Postgres)', () => {
     });
 
     await postHeliusWebhook(app, [event]);
-    await postHeliusWebhook(app, [event]);   // replayed delivery
+    // Replayed delivery: short-circuits on `hasProcessedSignature` (which
+    // covers `unmatched_transfers` too), so it never reaches the
+    // unique(signature) upsert that used to absorb it.
+    await postHeliusWebhook(app, [event]);
 
     const rows = await readRowsWhere('unmatched_transfers', 'signature', signature);
     expect(rows).toHaveLength(1);
