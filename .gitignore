@@ -6,5 +6,7 @@ docs/*
 !docs/incidents/
 !docs/incidents/**
 !docs/FOUNDER_CHECKLIST.md
+!docs/fixtures/
+!docs/fixtures/**
 .DS_Store
 .vercel
