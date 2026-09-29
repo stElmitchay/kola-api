@@ -61,7 +61,7 @@ app.post('/api-keys', async (c) => {
   return c.json({
     message: 'API key created. Store this key securely — it will not be shown again.',
     apiKey: result.apiKey,
-    application: result.record
+    application: recordSansHash
   }, 201);
 });
 
