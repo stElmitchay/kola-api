@@ -8,5 +8,8 @@
       "source": "/webhooks/(.*)",
       "destination": "/api"
     }
+  ],
+  "crons": [
+    { "path": "/api/internal/transfer-tick", "schedule": "* * * * *" }
   ]
 }

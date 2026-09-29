@@ -11,6 +11,7 @@ import deposits from '../src/routes/deposits/index.js';
 import withdrawals from '../src/routes/withdrawals/index.js';
 import monimeWebhook from '../src/routes/webhooks/monime.js';
 import heliusWebhook from '../src/routes/webhooks/helius.js';
+import transferTick from '../src/routes/internal/transfer-tick.js';
 import { killSwitch } from '../src/middleware/kill-switch.js';
 
 const app = new Hono().basePath('/api');
@@ -54,6 +55,9 @@ app.route('/v1/withdrawals', withdrawals);
 // Webhook routes (signature verified)
 app.route('/webhooks/monime', monimeWebhook);
 app.route('/webhooks/helius', heliusWebhook);
+
+// Internal cron worker (CRON_SECRET auth, not an admin/API-key route)
+app.route('/internal/transfer-tick', transferTick);
 
 // Global fallback error handler
 app.onError((err, c) => {

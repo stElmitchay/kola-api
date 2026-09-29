@@ -10,6 +10,7 @@ import {
 import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
   getAccount,
   TOKEN_PROGRAM_ID
@@ -139,6 +140,83 @@ export async function transferUsdc(destinationAddress, amountMinorUnits) {
   } catch (error) {
     throw createOnChainError(`USDC transfer failed: ${error.message}`);
   }
+}
+
+/**
+ * Build and sign (but do NOT send) a USDC transfer. The signature is known
+ * before broadcast, so it is persisted first and a crash can never leave an
+ * untracked in-flight transaction (F9).
+ * @param {string} destinationAddress
+ * @param {number} amountMinorUnits
+ * @returns {Promise<{ signature: string, serialized: Buffer, blockhash: string, lastValidBlockHeight: number }>}
+ */
+export async function buildSignedUsdcTransfer(destinationAddress, amountMinorUnits) {
+  const connection = getConnection();
+  const treasury = getTreasuryKeypair();
+  const usdcMint = getUsdcMint();
+  const destination = new PublicKey(destinationAddress);
+
+  const treasuryAta = await getAssociatedTokenAddress(usdcMint, treasury.publicKey);
+  const destinationAta = await getAssociatedTokenAddress(usdcMint, destination, true);
+
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+  const tx = new Transaction({ feePayer: treasury.publicKey, blockhash, lastValidBlockHeight }).add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      treasury.publicKey, destinationAta, destination, usdcMint
+    ),
+    createTransferInstruction(treasuryAta, destinationAta, treasury.publicKey, BigInt(amountMinorUnits))
+  );
+  tx.sign(treasury);
+  const signature = bs58.encode(tx.signatures[0].signature);
+  return { signature, serialized: tx.serialize(), blockhash, lastValidBlockHeight };
+}
+
+/**
+ * Check whether a signature has landed on-chain. Used by the transfer-tick
+ * worker to decide whether a 'sending' job can be finished, must be left
+ * alone (still confirming, or blockhash not yet expired), or is safe to
+ * rebuild (blockhash provably expired and never landed).
+ * @param {string} signature
+ * @returns {Promise<'finalized'|'pending'|'not_found'>}
+ */
+export async function checkSignatureLanded(signature) {
+  const connection = getConnection();
+  const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+  const s = value[0];
+  if (!s) return 'not_found';
+  if (s.err) return 'not_found';                    // landed-but-failed: safe to rebuild
+  return s.confirmationStatus === 'finalized' ? 'finalized' : 'pending';
+}
+
+/**
+ * Broadcast a pre-signed, pre-recorded transaction and wait for finalized
+ * confirmation. Thin wrapper — the signature has already been persisted by
+ * the caller (via recordSignature) before this is invoked.
+ * @param {Buffer} serialized
+ * @param {string} signature
+ * @param {string} blockhash
+ * @param {number} lastValidBlockHeight
+ * @returns {Promise<void>}
+ */
+export async function sendSerializedTransaction(serialized, signature, blockhash, lastValidBlockHeight) {
+  const connection = getConnection();
+  await connection.sendRawTransaction(serialized, { skipPreflight: false });
+  const { value } = await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight }, 'finalized'
+  );
+  if (value.err) {
+    throw createOnChainError(`Transaction ${signature} confirmed with error: ${JSON.stringify(value.err)}`);
+  }
+}
+
+/**
+ * Current Solana block height — used by the transfer-tick worker to decide
+ * whether a 'sending' job's blockhash has provably expired.
+ * @returns {Promise<number>}
+ */
+export async function getCurrentBlockHeight() {
+  const connection = getConnection();
+  return connection.getBlockHeight();
 }
 
 /**
