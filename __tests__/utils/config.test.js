@@ -1,5 +1,3 @@
-import { jest } from '@jest/globals';
-
 const { validateConfig, envInt, envStr, REQUIRED_VARS, __resetConfigForTests } =
   await import('../../src/utils/config.js');
 

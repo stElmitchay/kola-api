@@ -46,7 +46,8 @@ app.post('/api-keys', async (c) => {
     rateLimit: body.rateLimit
   });
 
-  const { key_hash: _keyHash, ...recordSansHash } = result.record || {};
+  const recordSansHash = { ...(result.record || {}) };
+  delete recordSansHash.key_hash;
 
   await audit({
     actor: c.get('adminActor'),

@@ -45,8 +45,9 @@ export async function handleHeliusEvent(events) {
       // float involved); fall back to exact BigNumber string math on
       // tokenAmount, never plain float multiplication (F18).
       // ASSUMPTION(V-D-adjacent): verify against docs/fixtures/helius/ — fixture wins
-      const amountMinorUnits = t.rawTokenAmount?.tokenAmount != null
-        ? Number(t.rawTokenAmount.tokenAmount)   // integer string from Helius — exact
+      const rawTokenAmount = t.rawTokenAmount?.tokenAmount;
+      const amountMinorUnits = rawTokenAmount !== null && rawTokenAmount !== undefined
+        ? Number(rawTokenAmount)   // integer string from Helius — exact
         : new BigNumber(String(t.tokenAmount)).multipliedBy(1_000_000).integerValue(BigNumber.ROUND_HALF_UP).toNumber();
       if (!fromWallet || !Number.isFinite(amountMinorUnits)) continue;
 

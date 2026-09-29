@@ -43,7 +43,7 @@ function assertBalancedPerCurrency(entries) {
     totals[currency] ??= { debit: 0n, credit: 0n };
     totals[currency][e.direction] += BigInt(e.amount);
   }
-  for (const [currency, { debit, credit }] of Object.entries(totals)) {
+  for (const { debit, credit } of Object.values(totals)) {
     expect(debit).toBe(credit);
   }
 }

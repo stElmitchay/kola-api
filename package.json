@@ -6,6 +6,7 @@
   "scripts": {
     "start": "NODEJS_HELPERS=0 vercel dev",
     "test": "node --experimental-vm-modules ./node_modules/.bin/jest",
+    "lint": "eslint src api scripts __tests__",
     "deploy": "vercel",
     "get:env": "vercel env pull"
   },
@@ -25,7 +26,10 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/jest": "^29.5.12",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
     "jest": "^29.7.0",
     "vercel": "^32.7.2"
   },
