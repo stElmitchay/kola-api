@@ -51,20 +51,30 @@ export async function postJournal(kind, { resourceType, resourceId, idempotencyK
  * SLE moves through the fx_sle conversion account, and the equivalent USDC
  * becomes payable to the user pending the on-chain transfer. Balances per
  * currency: monime_sle/fx_sle (SLE), fx_usdc/user_payable_usdc (USDC).
+ *
+ * The whole body runs inside the try — including entry construction — so
+ * the never-throw contract covers everything, not just the rpc call
+ * (postJournal already never throws on its own; this is defense-in-depth
+ * for whatever happens before it's called).
  * @param {{id: string, amount_sle: number|bigint, amount_usdc: number|bigint}} deposit
  */
 export async function postDepositCollection(deposit) {
-  await postJournal('deposit_collection', {
-    resourceType: 'deposit',
-    resourceId: deposit.id,
-    idempotencyKey: `deposit_collection:${deposit.id}`,
-    entries: [
+  try {
+    const entries = [
       { account: 'monime_sle', direction: 'debit', amount: deposit.amount_sle },
       { account: 'fx_sle', direction: 'credit', amount: deposit.amount_sle },
       { account: 'fx_usdc', direction: 'debit', amount: deposit.amount_usdc },
       { account: 'user_payable_usdc', direction: 'credit', amount: deposit.amount_usdc }
-    ]
-  });
+    ];
+    await postJournal('deposit_collection', {
+      resourceType: 'deposit',
+      resourceId: deposit.id,
+      idempotencyKey: `deposit_collection:${deposit.id}`,
+      entries
+    });
+  } catch (e) {
+    console.error(`[Ledger] ALERT: postDepositCollection threw before posting for deposit ${deposit?.id}: ${e.message}`);
+  }
 }
 
 /**
@@ -72,54 +82,73 @@ export async function postDepositCollection(deposit) {
  * @param {{id: string, amount_usdc: number|bigint}} deposit
  */
 export async function postDepositPayout(deposit) {
-  await postJournal('deposit_payout', {
-    resourceType: 'deposit',
-    resourceId: deposit.id,
-    idempotencyKey: `deposit_payout:${deposit.id}`,
-    entries: [
+  try {
+    const entries = [
       { account: 'user_payable_usdc', direction: 'debit', amount: deposit.amount_usdc },
       { account: 'treasury_usdc', direction: 'credit', amount: deposit.amount_usdc }
-    ]
-  });
+    ];
+    await postJournal('deposit_payout', {
+      resourceType: 'deposit',
+      resourceId: deposit.id,
+      idempotencyKey: `deposit_payout:${deposit.id}`,
+      entries
+    });
+  } catch (e) {
+    console.error(`[Ledger] ALERT: postDepositPayout threw before posting for deposit ${deposit?.id}: ${e.message}`);
+  }
 }
 
 /**
- * USDC receipt verified for a withdrawal. The USDC pair (treasury_usdc /
- * fx_usdc) balances on its own and always posts. The SLE trio that splits
- * fee income out of the gross only posts when `amount_sle_gross` is
- * present — rows created before migration 0015 lack that column, and a
- * one-sided SLE entry would break the per-currency balance invariant, so
- * those (expected to be rare on a clean slate) are logged for manual
- * backfill instead of guessed at.
+ * USDC receipt verified for a withdrawal. The USDC pair (treasury_usdc
+ * debit / fx_usdc credit) balances on its own and always posts. The SLE
+ * side (fx_sle debit gross / user_payable_sle credit net) only posts when
+ * `amount_sle_gross` is present — rows created before migration 0015 lack
+ * that column, and a one-sided SLE entry would break the per-currency
+ * balance invariant, so those (expected to be rare on a clean slate) are
+ * logged for manual backfill instead of guessed at.
+ *
+ * The fee_income_sle entry (gross − net) is only pushed when that
+ * difference is > 0. `ledger_entries.amount` has `CHECK (amount > 0)`
+ * (0015): a zero-fee withdrawal (WITHDRAWAL_FEE_BPS=0 is a first-class
+ * config, and `withdrawals.fee_bps` DEFAULTs to 0 — also reachable purely
+ * from ROUND_DOWN rounding landing gross and net in the same minor-unit
+ * bucket) would otherwise push a zero-amount entry, which fails the CHECK
+ * and aborts the *entire* post_journal call, including the USDC pair.
  * @param {{id: string, amount_usdc: number|bigint, amount_sle: number|bigint, amount_sle_gross?: number|bigint|null}} withdrawal
  */
 export async function postWithdrawalReceipt(withdrawal) {
-  const entries = [
-    { account: 'treasury_usdc', direction: 'debit', amount: withdrawal.amount_usdc },
-    { account: 'fx_usdc', direction: 'credit', amount: withdrawal.amount_usdc }
-  ];
+  try {
+    const entries = [
+      { account: 'treasury_usdc', direction: 'debit', amount: withdrawal.amount_usdc },
+      { account: 'fx_usdc', direction: 'credit', amount: withdrawal.amount_usdc }
+    ];
 
-  if (withdrawal.amount_sle_gross === null || withdrawal.amount_sle_gross === undefined) {
-    console.error(
-      `[Ledger] ALERT: withdrawal ${withdrawal.id} has no amount_sle_gross (pre-0015 row) — ` +
-      'posted USDC leg only; SLE fee-split entries need manual backfill'
-    );
-  } else {
-    const gross = BigInt(withdrawal.amount_sle_gross);
-    const net = BigInt(withdrawal.amount_sle);
-    entries.push(
-      { account: 'fx_sle', direction: 'debit', amount: gross },
-      { account: 'user_payable_sle', direction: 'credit', amount: net },
-      { account: 'fee_income_sle', direction: 'credit', amount: gross - net }
-    );
+    if (withdrawal.amount_sle_gross === null || withdrawal.amount_sle_gross === undefined) {
+      console.error(
+        `[Ledger] ALERT: withdrawal ${withdrawal.id} has no amount_sle_gross (pre-0015 row) — ` +
+        'posted USDC leg only; SLE fee-split entries need manual backfill'
+      );
+    } else {
+      const gross = BigInt(withdrawal.amount_sle_gross);
+      const net = BigInt(withdrawal.amount_sle);
+      entries.push(
+        { account: 'fx_sle', direction: 'debit', amount: gross },
+        { account: 'user_payable_sle', direction: 'credit', amount: net }
+      );
+      if (gross > net) {
+        entries.push({ account: 'fee_income_sle', direction: 'credit', amount: gross - net });
+      }
+    }
+
+    await postJournal('withdrawal_receipt', {
+      resourceType: 'withdrawal',
+      resourceId: withdrawal.id,
+      idempotencyKey: `withdrawal_receipt:${withdrawal.id}`,
+      entries
+    });
+  } catch (e) {
+    console.error(`[Ledger] ALERT: postWithdrawalReceipt threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
   }
-
-  await postJournal('withdrawal_receipt', {
-    resourceType: 'withdrawal',
-    resourceId: withdrawal.id,
-    idempotencyKey: `withdrawal_receipt:${withdrawal.id}`,
-    entries
-  });
 }
 
 /**
@@ -128,13 +157,18 @@ export async function postWithdrawalReceipt(withdrawal) {
  * @param {{id: string, amount_sle: number|bigint}} withdrawal
  */
 export async function postWithdrawalPayout(withdrawal) {
-  await postJournal('withdrawal_payout', {
-    resourceType: 'withdrawal',
-    resourceId: withdrawal.id,
-    idempotencyKey: `withdrawal_payout:${withdrawal.id}`,
-    entries: [
+  try {
+    const entries = [
       { account: 'user_payable_sle', direction: 'debit', amount: withdrawal.amount_sle },
       { account: 'monime_sle', direction: 'credit', amount: withdrawal.amount_sle }
-    ]
-  });
+    ];
+    await postJournal('withdrawal_payout', {
+      resourceType: 'withdrawal',
+      resourceId: withdrawal.id,
+      idempotencyKey: `withdrawal_payout:${withdrawal.id}`,
+      entries
+    });
+  } catch (e) {
+    console.error(`[Ledger] ALERT: postWithdrawalPayout threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
+  }
 }

@@ -5,6 +5,7 @@ const updateWithdrawalIfStatus = jest.fn();
 const createPayout = jest.fn();
 const getWithdrawalRepo = jest.fn();
 const postWithdrawalReceipt = jest.fn();
+const verifyIncomingUsdcTransfer = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
   createWithdrawal: jest.fn(), getWithdrawal: getWithdrawalRepo,
@@ -13,7 +14,7 @@ jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
 }));
 jest.unstable_mockModule('../../src/utils/monime.js', () => ({ createPayout }));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
-  getTreasuryAddress: () => 'TREASURY', verifyIncomingUsdcTransfer: jest.fn()
+  getTreasuryAddress: () => 'TREASURY', verifyIncomingUsdcTransfer
 }));
 jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({
   getActiveRate: jest.fn(), assertRateFresh: jest.fn()
@@ -77,4 +78,44 @@ test('F19: duplicate-open error does not reveal the other withdrawal id', async 
     expect(error.message).not.toContain('SECRET-UUID');
     expect(error.message).toMatch(/open withdrawal already exists/i);
   }
+});
+
+test('B4/MINOR4(a): happy-path confirm posts withdrawal_receipt with the claimed row before triggering payout', async () => {
+  const pending = {
+    id: 'w-happy', status: 'pending_deposit',
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    from_wallet_address: 'W'.repeat(44), amount_usdc: 5_000_000,
+    amount_sle: 12_375, amount_sle_gross: 12_500,
+    phone_number: '+23276000000', provider_code: 'm17'
+  };
+  const claimed = { ...pending, status: 'received', solana_tx_signature: 'SIG' };
+
+  getWithdrawalRepo.mockResolvedValue({ data: pending, error: null });
+  verifyIncomingUsdcTransfer.mockResolvedValue({ ok: true });
+  updateWithdrawalIfStatus
+    .mockResolvedValueOnce({ data: claimed, error: null })                        // pending_deposit -> received claim
+    .mockResolvedValueOnce({ data: { ...claimed, status: 'processing' }, error: null }); // received -> processing (triggerPayoutForWithdrawal)
+  createPayout.mockResolvedValue({ id: 'mp-1' });
+
+  await confirmWithdrawal('w-happy', 'app-1', 'SIG');
+
+  expect(postWithdrawalReceipt).toHaveBeenCalledWith(claimed);
+  const receiptOrder = postWithdrawalReceipt.mock.invocationCallOrder[0];
+  const payoutOrder = createPayout.mock.invocationCallOrder[0];
+  expect(receiptOrder).toBeLessThan(payoutOrder); // receipt posted before the payout is triggered
+});
+
+test('B4/MINOR4(c): a lost CAS claim posts nothing to the ledger', async () => {
+  const pending = {
+    id: 'w-lost', status: 'pending_deposit',
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    from_wallet_address: 'W'.repeat(44), amount_usdc: 1_000_000
+  };
+  getWithdrawalRepo.mockResolvedValue({ data: pending, error: null });
+  verifyIncomingUsdcTransfer.mockResolvedValue({ ok: true });
+  updateWithdrawalIfStatus.mockResolvedValueOnce({ data: null, error: null }); // another writer already claimed it
+
+  await confirmWithdrawal('w-lost', 'app-1', 'SIG');
+
+  expect(postWithdrawalReceipt).not.toHaveBeenCalled();
 });

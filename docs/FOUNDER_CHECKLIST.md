@@ -341,7 +341,11 @@ steps to actually apply and verify them against production.
 
    select trigger_name from information_schema.triggers
      where event_object_table in ('ledger_entries', 'ledger_journals');
-   -- Expected: trg_entries_immutable, trg_journals_immutable, trg_journal_balanced
+   -- Expected: 5 rows. information_schema.triggers emits one row per
+   -- (trigger, event) pair, and the two immutability triggers each fire on
+   -- two events (BEFORE UPDATE OR DELETE) -> trg_entries_immutable x2 +
+   -- trg_journals_immutable x2 + trg_journal_balanced (single AFTER INSERT
+   -- event) x1 = 5 rows total, naming only those 3 distinct trigger names.
 
    select has_function_privilege('anon', 'post_journal(text,text,uuid,text,jsonb)', 'execute');
    -- Expected: false
@@ -369,8 +373,9 @@ steps to actually apply and verify them against production.
 
    **`treasury_usdc` ledger balance vs. on-chain delta.** Compute the
    ledger-side net movement of the `treasury_usdc` account since the drill
-   started (a `deposit_payout` debits treasury when a USDC payout lands; a
-   `withdrawal_receipt` credits treasury when incoming USDC is verified):
+   started (a `deposit_payout` CREDITS treasury when a USDC payout leaves
+   it to a user's wallet; a `withdrawal_receipt` DEBITS treasury when
+   incoming USDC from a user is verified and lands in it):
 
    ```sql
    select
