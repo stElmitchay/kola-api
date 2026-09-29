@@ -430,11 +430,28 @@ steps to actually apply and verify them against production.
    -- Expected: both false
    ```
 
-3. **Concurrency proof — 10 parallel creates at cap−1 remaining, exactly one
-   succeeds.** There is no local Postgres in this environment, so this has to
-   be run by hand against a real (devnet-pointed) Supabase project with the
-   service-role key. It talks to the database directly via the RPC — no live
-   Solana or Monime calls happen, so it's safe to run repeatedly.
+   Note: 0016 takes two `pg_advisory_xact_lock`s per call — one keyed on
+   phone, one keyed on `from_wallet_address` — acquired in deterministic
+   hash order so concurrent transactions can never deadlock against each
+   other; this closes a cross-phone/same-wallet race on the duplicate-open
+   check that a phone-only lock would have missed.
+
+3. **Concurrency proof — two scenarios, run against a real (devnet-pointed)
+   Supabase project with the service-role key.** There is no local Postgres
+   in this environment, so both have to be run by hand. They talk to the
+   database directly via the RPC — no live Solana or Monime calls happen, so
+   they're safe to run repeatedly.
+
+   **Scenario A — same phone, cap enforcement:** 10 parallel creates at
+   cap−1 remaining, exactly one succeeds.
+
+   **Scenario B — same wallet + amount, different phones, dup-check
+   enforcement:** 10 parallel creates for the same `from_wallet_address` and
+   `amount_usdc` but 10 distinct phone numbers → exactly one succeeds, the
+   other nine fail with `DUPLICATE_OPEN_WITHDRAWAL`. This is the scenario the
+   dual-lock fix (above) closes — under the old phone-only lock, all 10 could
+   race past the dup check and insert, since none of them held the same
+   phone lock.
 
    Save as `scripts/b5-concurrency-proof.mjs`:
 
@@ -455,30 +472,28 @@ steps to actually apply and verify them against production.
    const ATTEMPT_AMOUNT = 50_000_000; // 50 USDC per attempt
    const SEED_USED = DAILY_CAP - ATTEMPT_AMOUNT; // leaves room for exactly ONE attempt to fit
 
-   function baseWithdrawal(i) {
+   function baseWithdrawal({ i, phone, wallet, amount = ATTEMPT_AMOUNT }) {
      const now = new Date();
      return {
        application: APPLICATION,
-       phone_number: PHONE,
-       from_wallet_address: `${WALLET_PREFIX}${String(i).padStart(37, '0')}`, // unique per attempt, 44 chars
+       phone_number: phone,
+       from_wallet_address: wallet,
        provider_code: 'm17',
-       amount_usdc: ATTEMPT_AMOUNT,
+       amount_usdc: amount,
        amount_sle: 1,
        amount_sle_gross: 1,
        fee_bps: 100,
        exchange_rate: '25',
        expires_at: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
-       metadata: { b5_concurrency_proof: true }
+       metadata: { b5_concurrency_proof: true, i }
      };
    }
 
-   async function main() {
-     if (!APPLICATION) throw new Error('Set B5_PROOF_APPLICATION to a real application uuid');
-
-     // 1. Clean up any leftovers from a previous run.
+   async function scenarioA_sameCap() {
+     // Same phone, cap enforcement: 10 parallel creates at cap-1 remaining
+     // -> exactly one succeeds, nine hit DAILY_CAP_EXCEEDED.
      await supabase.from('withdrawals').delete().eq('phone_number', PHONE);
 
-     // 2. Seed prior usage so only ATTEMPT_AMOUNT of headroom remains under the cap.
      const { error: seedErr } = await supabase.from('withdrawals').insert({
        application: APPLICATION,
        phone_number: PHONE,
@@ -494,10 +509,12 @@ steps to actually apply and verify them against production.
      });
      if (seedErr) throw seedErr;
 
-     // 3. Fire 10 parallel create_withdrawal_guarded calls for the same phone.
      const results = await Promise.allSettled(
        Array.from({ length: 10 }, (_, i) =>
-         supabase.rpc('create_withdrawal_guarded', { p: baseWithdrawal(i), p_daily_cap: DAILY_CAP })
+         supabase.rpc('create_withdrawal_guarded', {
+           p: baseWithdrawal({ i, phone: PHONE, wallet: `${WALLET_PREFIX}${String(i).padStart(37, '0')}` }),
+           p_daily_cap: DAILY_CAP
+         })
        )
      );
 
@@ -506,10 +523,10 @@ steps to actually apply and verify them against production.
        const { data, error } = r.value;
        return { i, ok: !error && !!data, reason: error?.message ?? null };
      });
-
      const successes = outcomes.filter(o => o.ok);
      const capFailures = outcomes.filter(o => !o.ok && /DAILY_CAP_EXCEEDED/.test(o.reason || ''));
 
+     console.log('--- Scenario A: same phone, cap enforcement ---');
      console.log(JSON.stringify(outcomes, null, 2));
      console.log(`successes=${successes.length} capFailures=${capFailures.length}`);
      console.log(
@@ -518,8 +535,52 @@ steps to actually apply and verify them against production.
          : 'FAIL: expected exactly 1 success and 9 DAILY_CAP_EXCEEDED failures — investigate before shipping'
      );
 
-     // 4. Clean up.
      await supabase.from('withdrawals').delete().eq('phone_number', PHONE);
+   }
+
+   async function scenarioB_sameWalletDifferentPhones() {
+     // Same wallet + amount, 10 DIFFERENT phones: dup-check enforcement.
+     // Exercises the dual-lock fix — a phone-only lock would let all 10
+     // race past the (wallet, amount) EXISTS check since no two of them
+     // share a phone lock.
+     const wallet = `${WALLET_PREFIX}DUPW`.padEnd(44, '0');
+     const phones = Array.from({ length: 10 }, (_, i) => `+2327600${String(1000 + i).slice(-4)}`);
+
+     await supabase.from('withdrawals').delete().eq('from_wallet_address', wallet);
+
+     const results = await Promise.allSettled(
+       phones.map((phone, i) =>
+         supabase.rpc('create_withdrawal_guarded', {
+           p: baseWithdrawal({ i, phone, wallet, amount: ATTEMPT_AMOUNT }),
+           p_daily_cap: DAILY_CAP // plenty of headroom — this scenario isn't testing the cap
+         })
+       )
+     );
+
+     const outcomes = results.map((r, i) => {
+       if (r.status === 'rejected') return { i, ok: false, reason: String(r.reason) };
+       const { data, error } = r.value;
+       return { i, ok: !error && !!data, reason: error?.message ?? null };
+     });
+     const successes = outcomes.filter(o => o.ok);
+     const dupFailures = outcomes.filter(o => !o.ok && /DUPLICATE_OPEN_WITHDRAWAL/.test(o.reason || ''));
+
+     console.log('--- Scenario B: same wallet+amount, different phones, dup-check enforcement ---');
+     console.log(JSON.stringify(outcomes, null, 2));
+     console.log(`successes=${successes.length} dupFailures=${dupFailures.length}`);
+     console.log(
+       successes.length === 1 && dupFailures.length === 9
+         ? 'PASS: exactly one create succeeded, nine hit DUPLICATE_OPEN_WITHDRAWAL'
+         : 'FAIL: expected exactly 1 success and 9 DUPLICATE_OPEN_WITHDRAWAL failures — the dual-lock fix in 0016 did not land correctly'
+     );
+
+     await supabase.from('withdrawals').delete().eq('from_wallet_address', wallet);
+   }
+
+   async function main() {
+     if (!APPLICATION) throw new Error('Set B5_PROOF_APPLICATION to a real application uuid');
+     await scenarioA_sameCap();
+     await scenarioB_sameWalletDifferentPhones();
    }
 
    main().catch((err) => { console.error(err); process.exit(1); });
@@ -532,13 +593,15 @@ steps to actually apply and verify them against production.
      node scripts/b5-concurrency-proof.mjs
    ```
 
-   Expected output: `successes=1 capFailures=9` and the `PASS` line. Paste the
-   full JSON transcript here once run:
+   Expected output: `successes=1 capFailures=9` + `PASS` for Scenario A, and
+   `successes=1 dupFailures=9` + `PASS` for Scenario B. Paste the full
+   transcript (both scenarios) here once run:
 
    ```
-   <paste the script's JSON output + PASS/FAIL line here>
+   <paste the script's JSON output + PASS/FAIL lines for both scenarios here>
    ```
 
-   If it ever prints more than one success, the advisory lock isn't
-   serialising creates for the phone — stop and re-check that migration 0016
-   applied cleanly (step 2) before shipping withdrawals traffic.
+   If either scenario ever prints more than one success, the corresponding
+   advisory lock isn't doing its job — stop and re-check that migration 0016
+   applied cleanly (step 2, including both locks) before shipping withdrawals
+   traffic.
