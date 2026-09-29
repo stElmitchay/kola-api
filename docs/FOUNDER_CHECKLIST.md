@@ -950,3 +950,73 @@ outstanding is deploying it and watching the first few live runs.
      (the handler never trusts the payload's money claims; see that file).
 
 ## Task D1 — enable branch protection on main requiring the 'test' check
+
+## Task D2 — run the integration suite
+
+The money-path integration suite (`__tests__/integration/`) exists and is
+committed, but it **has never been executed**: this environment had no
+Supabase CLI and no Docker, so there was no Postgres to run it against.
+Everything in it was written directly against the real routes, repos and
+migration files, but first-run breakage is expected and normal. This is the
+single highest-value item on this checklist — it is the only thing that
+exercises `create_withdrawal_guarded`'s advisory locks, the compare-and-swap
+claims, the state-machine triggers and the ledger balance trigger against a
+real database.
+
+1. **Install the prerequisites** (once): Docker Desktop, and the Supabase
+   CLI (`brew install supabase/tap/supabase`).
+
+2. **Follow `docs/testing.md` → "Integration suite"** end to end. The short
+   version:
+
+   ```bash
+   supabase start                      # note the printed service_role key
+   export SUPABASE_SERVICE_ROLE_KEY='<service_role key>'
+   # apply the migration chain in TRUE numeric order — see the caveat below
+   psql 'postgresql://postgres:postgres@127.0.0.1:54322/postgres' \
+     -v ON_ERROR_STOP=1 -f supabase/migrations/001_initial_schema.sql -f ...
+   npm run test:integration
+   ```
+
+3. **Do not use `supabase db reset` on a fresh stack without checking the
+   order first.** The CLI sorts migrations lexicographically by their
+   numeric prefix, and `001` sorts *after* `0009`, so a reset tries to
+   create `withdrawals` before `auth_api_keys` exists and stops with
+   `relation "auth_api_keys" does not exist`. Verify with
+   `supabase migration list`. `docs/testing.md` gives the explicit ordered
+   `psql` apply that sidesteps the question. **Do not rename
+   `001_initial_schema.sql`** to fix the sort — production's migration
+   history records that exact version string, so a rename would make
+   `supabase db push` treat it as a new migration. If you want the chain
+   renumbered, that needs a decision record and a coordinated history
+   repair, not a quiet rename.
+
+4. **Expect to iterate.** When a spec fails, the failure is evidence about
+   one of three things, in this order of likelihood:
+   - a harness assumption (a synthetic payload field, a seeded env value) —
+     fix `__tests__/integration/helpers.js`;
+   - a schema difference introduced out-of-band in the missing `0002`–`0006`
+     gap (`supabase/migrations/README.md`) — promote it into a real
+     migration numbered `>= 0009` so the chain becomes self-sufficient;
+   - an actual bug in the money path — which is the point of the suite.
+     Fix the code, not the assertion.
+
+5. **Consider wiring it into CI** once it is green locally. It needs a
+   Postgres service container plus the migration apply, and
+   `INTEGRATION_REQUIRE_STACK=1` so a missing stack fails the job instead of
+   silently skipping every spec (the default behaviour, chosen so that
+   `npm run test:integration` on a laptop without Docker exits 0 rather than
+   dumping 25 connection errors).
+
+6. **Follow-up flagged by the suite (not a blocker).** The dual-racer fuzz
+   documents a real operational wart: when a manual `POST /:id/confirm`
+   wins the compare-and-swap, the losing Helius callback for the *same*
+   on-chain transfer no longer matches an open withdrawal and books that
+   transfer to `unmatched_transfers` + a `suspense_in` journal. No money is
+   lost or double-paid (the spec asserts every such row corresponds to a
+   withdrawal already in `processing`), but it raises a phantom suspense
+   item for an operator to chase. The fix is for the no-match path in
+   `src/routes/webhooks/helius-handler.js` to check whether the signature is
+   already recorded on a withdrawal or deposit — `hasProcessedSignature()`
+   in `src/repos/reconciliation.js` is exactly that query — before booking
+   to suspense.

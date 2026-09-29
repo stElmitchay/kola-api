@@ -6,6 +6,7 @@ docs/*
 !docs/incidents/
 !docs/incidents/**
 !docs/FOUNDER_CHECKLIST.md
+!docs/testing.md
 !docs/fixtures/
 !docs/fixtures/**
 !docs/runbooks/

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "NODEJS_HELPERS=0 vercel dev",
     "test": "node --experimental-vm-modules ./node_modules/.bin/jest",
+    "test:integration": "INTEGRATION=1 node --experimental-vm-modules ./node_modules/.bin/jest __tests__/integration --runInBand --testTimeout=60000 --testPathIgnorePatterns=/node_modules/",
     "lint": "eslint src api scripts __tests__",
     "deploy": "vercel",
     "get:env": "vercel env pull"
