@@ -27,7 +27,12 @@ app.post('/', async (c) => {
   // ASSUMPTION(V-A): verify against docs/fixtures/monime/ — fixture wins
   const eventId = payload.event?.id;
 
-  const { isNew } = await recordWebhookEvent('monime', eventId, eventName, payload, rawBody);
+  const { isNew, error: gateError } = await recordWebhookEvent('monime', eventId, eventName, payload, rawBody);
+  if (gateError) {
+    console.error(`[Webhook] Event gate error for ${eventName}: ${gateError.message}`);
+    c.header('Retry-After', '60');
+    return c.json({ error: 'Event gate unavailable' }, 503);
+  }
   if (!isNew) {
     return c.json({ received: true, duplicate: true });
   }

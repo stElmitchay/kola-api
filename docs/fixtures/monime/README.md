@@ -49,7 +49,11 @@ section with the answers):
 
 4. **Retry behaviour on a non-2xx response.** Return a 500 from the
    capture endpoint once and observe whether/how many times Monime
-   retries, and over what window.
+   retries, and over what window. The live API now returns `503` (with
+   `Retry-After: 60`) whenever the `recordWebhookEvent` exactly-once gate
+   itself fails (e.g. a transient Supabase outage), specifically so Monime
+   retries instead of the event being silently swallowed as a false
+   duplicate — confirm Monime does in fact retry on `5xx` responses.
 
 ## THE FIXTURE WINS
 
