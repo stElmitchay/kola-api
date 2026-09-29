@@ -2,6 +2,7 @@
 
 import { Hono } from 'hono';
 import { apiKeyAuth } from '../../middleware/api-key-auth.js';
+import { rateLimit } from '../../middleware/rate-limit.js';
 import { errorHandler } from '../../middleware/error-handler.js';
 import { idempotency } from '../../middleware/idempotency.js';
 import {
@@ -18,6 +19,7 @@ import {
 const app = new Hono();
 
 app.use('/*', apiKeyAuth);
+app.use('/*', rateLimit);
 app.onError(errorHandler);
 
 app.post('/', idempotency('withdrawals'), async (c) => {

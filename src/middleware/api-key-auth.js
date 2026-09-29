@@ -46,6 +46,7 @@ export async function apiKeyAuth(c, next) {
 
   c.set('clientId', data.client_id);
   c.set('application', data.id);
+  c.set('rateLimit', data.rate_limit);
 
   await next();
 }
