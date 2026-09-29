@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import bs58 from 'bs58';
 
 // Import the REAL @solana/web3.js first (before any mock registration) so
 // the mock factory below can delegate to the real Connection class —
@@ -21,12 +22,12 @@ const {
   getConnection,
   getFallbackConnection,
   withRpcFailover,
-  __resetConnectionsForTests
+  __resetConnectionsForTests: resetConnectionsForTests
 } = await import('../../src/utils/connection.js');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  __resetConnectionsForTests();
+  resetConnectionsForTests();
   process.env.HELIUS_URL = 'https://primary.test';
   delete process.env.SOLANA_RPC_FALLBACK_URL;
 });
@@ -87,12 +88,12 @@ test('primary rejects, fallback also rejects -> the fallback error propagates', 
   expect(fn).toHaveBeenCalledTimes(2);
 });
 
-describe('call site: getTreasuryUsdcBalanceMinor goes through withRpcFailover', () => {
+describe('call site: getTreasuryUsdcBalanceMinor / buildSignedUsdcTransfer go through withRpcFailover', () => {
   let getTreasuryUsdcBalanceMinor;
+  let buildSignedUsdcTransfer;
   let mockWithRpcFailover;
 
   beforeAll(async () => {
-    const bs58 = (await import('bs58')).default;
     process.env.TREASURY_SECRET_KEY = bs58.encode(web3Actual.Keypair.generate().secretKey);
     process.env.USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
@@ -104,10 +105,10 @@ describe('call site: getTreasuryUsdcBalanceMinor goes through withRpcFailover', 
       withRpcFailover: mockWithRpcFailover
     }));
 
-    ({ getTreasuryUsdcBalanceMinor } = await import('../../src/utils/solana.js'));
+    ({ getTreasuryUsdcBalanceMinor, buildSignedUsdcTransfer } = await import('../../src/utils/solana.js'));
   });
 
-  test('calls withRpcFailover instead of talking to the connection directly', async () => {
+  test('getTreasuryUsdcBalanceMinor calls withRpcFailover instead of talking to the connection directly', async () => {
     mockWithRpcFailover.mockResolvedValueOnce(42n);
 
     const result = await getTreasuryUsdcBalanceMinor();
@@ -115,5 +116,81 @@ describe('call site: getTreasuryUsdcBalanceMinor goes through withRpcFailover', 
     expect(mockWithRpcFailover).toHaveBeenCalledTimes(1);
     expect(mockWithRpcFailover).toHaveBeenCalledWith(expect.any(Function));
     expect(result).toBe(42n);
+  });
+
+  test('buildSignedUsdcTransfer calls withRpcFailover for getLatestBlockhash', async () => {
+    // A blockhash is a 32-byte value, base58-encoded — reuse a fresh
+    // keypair's public key bytes as a stand-in so Transaction.sign()'s
+    // internal encoding doesn't reject it for being the wrong length.
+    const fakeBlockhash = web3Actual.Keypair.generate().publicKey.toBase58();
+    mockWithRpcFailover.mockResolvedValueOnce({ blockhash: fakeBlockhash, lastValidBlockHeight: 999 });
+
+    const result = await buildSignedUsdcTransfer('11111111111111111111111111111111', 1_000_000);
+
+    expect(mockWithRpcFailover).toHaveBeenCalledTimes(1);
+    expect(mockWithRpcFailover).toHaveBeenCalledWith(expect.any(Function));
+    expect(result.blockhash).toBe(fakeBlockhash);
+    expect(result.lastValidBlockHeight).toBe(999);
+  });
+});
+
+describe('call site: getTreasuryUsdcBalanceMinor distinguishes not-found from transport failure', () => {
+  let getTreasuryUsdcBalanceMinor;
+  let __resetConnectionsForTests;
+  let getAccountMock;
+  let splTokenActual;
+
+  beforeAll(async () => {
+    splTokenActual = await import('@solana/spl-token');
+    getAccountMock = jest.fn();
+
+    process.env.TREASURY_SECRET_KEY = bs58.encode(web3Actual.Keypair.generate().secretKey);
+    process.env.USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    process.env.HELIUS_URL = 'https://primary.test';
+
+    jest.resetModules();
+    // '@solana/spl-token' is mocked here, but its real TokenAccountNotFoundError/
+    // TokenInvalidAccountOwnerError classes are re-exported unchanged — solana.js's
+    // `instanceof` check needs the exact same class reference the test throws.
+    jest.unstable_mockModule('@solana/spl-token', () => ({ ...splTokenActual, getAccount: getAccountMock }));
+    // connection.js was registered as a bare-stub mock in the earlier describe
+    // block; re-point that registration at the REAL exports (captured at the
+    // top of this file, before any mock was registered) so withRpcFailover's
+    // actual retry logic runs end-to-end here against the mocked getAccount —
+    // jest.unstable_mockModule has no "unmock", so pass-through is how this
+    // file un-does an earlier mock registration for the same specifier.
+    jest.unstable_mockModule('../../src/utils/connection.js', () => ({
+      getConnection, getFallbackConnection, withRpcFailover, __resetConnectionsForTests: resetConnectionsForTests
+    }));
+
+    ({ getTreasuryUsdcBalanceMinor } = await import('../../src/utils/solana.js'));
+    ({ __resetConnectionsForTests } = await import('../../src/utils/connection.js'));
+  });
+
+  beforeEach(() => {
+    getAccountMock.mockReset();
+    __resetConnectionsForTests();
+    delete process.env.SOLANA_RPC_FALLBACK_URL;
+  });
+
+  test('TokenAccountNotFoundError resolves to 0n with no failover retry', async () => {
+    getAccountMock.mockRejectedValueOnce(new splTokenActual.TokenAccountNotFoundError());
+
+    const result = await getTreasuryUsdcBalanceMinor();
+
+    expect(result).toBe(0n);
+    expect(getAccountMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a generic network error propagates out of the primary attempt and resolves via the fallback', async () => {
+    process.env.SOLANA_RPC_FALLBACK_URL = 'https://fallback.test';
+    getAccountMock
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValueOnce({ amount: 777n });
+
+    const result = await getTreasuryUsdcBalanceMinor();
+
+    expect(result).toBe(777n);
+    expect(getAccountMock).toHaveBeenCalledTimes(2);
   });
 });

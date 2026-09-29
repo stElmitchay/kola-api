@@ -54,6 +54,17 @@ export function getFallbackConnection() {
  * serialized transaction is idempotent on-chain, so retrying a send here
  * can never double-spend.
  *
+ * The other half of that story: if the primary DID actually broadcast
+ * before failing (e.g. it accepted the tx but timed out waiting for
+ * confirmation), the fallback's re-send of the same serialized transaction
+ * lands on an already-processed signature — the fallback RPC throws an
+ * "already processed" error, which this function does not swallow (no
+ * second retry). That throw is expected, not a bug: it burns one
+ * transfer-job `bumpAttempt` and the job is picked up again next
+ * transfer-tick, where `checkSignatureLanded` finds the signature already
+ * finalized on-chain and finishes the job normally. Self-healing by
+ * design — see `checkSignatureLanded` and the transfer-tick worker.
+ *
  * @template T
  * @param {(connection: Connection) => Promise<T>} fn
  * @returns {Promise<T>}
