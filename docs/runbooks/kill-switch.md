@@ -110,10 +110,10 @@ curl -si -X POST "$API_BASE_URL/api/v1/deposits" \
 -- Any webhook deliveries that arrived during the pause window should show
 -- up here now, timestamped AFTER the unpause (their FIRST successful
 -- delivery), not lost:
-select provider, event_id, event_type, created_at
+select provider, event_id, event_name, received_at
   from webhook_events
- where created_at > '<unpause timestamp>'
- order by created_at asc
+ where received_at > '<unpause timestamp>'
+ order by received_at asc
  limit 50;
 ```
 

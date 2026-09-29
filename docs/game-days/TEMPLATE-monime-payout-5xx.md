@@ -39,13 +39,31 @@ to `received`, and again on the operator-driven retry path. This drill proves:
 ## Step 1 — start the local 500 server
 
 ```bash
-node -e 'require("http").createServer((q,s)=>{s.writeHead(500);s.end()}).listen(9999)'
+node -e 'require("http").createServer((q,s)=>{s.writeHead(500,{"Content-Type":"application/json"});s.end(JSON.stringify({messages:["drill: simulated outage"]}))}).listen(9999)'
 ```
 
-Leave this running in its own terminal. It answers every request — any
-method, any path — with a bare `500` and an empty body, which is enough to
-make `monimeRequest` (`src/utils/monime.js`) hit its `!response.ok` branch
-and throw a `MonimeError`.
+Leave this running in its own terminal. **The body must be valid JSON.**
+`monimeRequest` (`src/utils/monime.js`) calls `await response.json()`
+*before* checking `response.ok`, and that call is outside the function's
+`try/catch` (only the `fetch()` call itself is guarded, for the
+timeout/abort case). An empty or non-JSON body throws a raw `SyntaxError`
+("Unexpected end of JSON input") that is NOT mapped in
+`errorHandler`'s `STATUS_MAP` — it falls through to a generic `500
+InternalError`, not the `502 MonimeError` this drill is meant to exercise,
+and the withdrawal's `failure_reason` ends up
+`Monime payout failed: Unexpected end of JSON input` instead of a real
+Monime-shaped message. The one-liner above avoids that by returning a
+body shaped like Monime's own error responses (`{"messages": [...]}`,
+which `monimeRequest`'s detail-extraction reads directly).
+
+<Warning>
+  If you modify the one-liner and it ever answers with a non-JSON or empty
+  body, you will see `500`/`InternalError` in every check below instead of
+  `502`/`MonimeError` — that is a drill-setup bug, not the vendor-outage
+  behavior this drill is meant to prove. Confirm the server is answering
+  valid JSON (`curl -s http://127.0.0.1:9999/anything | jq .` from another
+  terminal) before proceeding to Step 3.
+</Warning>
 
 ## Step 2 — point outbound Monime calls at it
 
@@ -95,15 +113,22 @@ curl -s -X POST "$API_BASE_URL/api/v1/withdrawals/<id>/confirm" \
 by `MONIME_BASE_URL`), advances `pending_deposit → received`, posts the
 `withdrawal_receipt` ledger journal, then calls `triggerPayoutForWithdrawal`
 → `createPayout` → `monimeRequest('POST', '/v1/payouts', ...)` against
-`http://127.0.0.1:9999`, which answers `500`.
+`http://127.0.0.1:9999`, which answers `500` with the JSON body from Step 1.
+
+With a valid JSON body, `monimeRequest`'s `await response.json()` succeeds,
+`!response.ok` fires, `data.messages` is an array so the detail-extraction
+uses it directly (`data.messages.join(', ')` → `"drill: simulated
+outage"`), and it throws `createMonimeError('Monime API error 500: drill:
+simulated outage')` — a real `MonimeError`, not a raw `SyntaxError`.
 
 Expected:
 - The `/confirm` response is `502` with the envelope
   `{"error":{"code":"MonimeError","message":"Internal error","request_id":"..."}}`
-  (the 500-server's body is opaque, so `monimeRequest`'s detail extraction
-  falls through to `JSON.stringify(data)` or similar — client message is
-  generic per `errorHandler`'s `isServerError` rule; the real detail is only
-  in the server log line).
+  — the client-facing `message` is still the generic `"Internal error"`
+  (`errorHandler` withholds the real detail for any 5xx-mapped error, per
+  policy); the real detail is only in the server log line
+  (`[Monime] request failed` with `status`, `path`, `method`, `detail`) and
+  in the DB's `failure_reason` below.
 - The local 500-server's terminal shows one request landed (confirms the
   override actually routed the call there).
 - SQL check:
@@ -113,8 +138,8 @@ Expected:
     from withdrawals where id = '<id>';
   ```
 
-  Expected: `status = 'failed'`, `failure_reason` starts with
-  `Monime payout failed: Monime API error 500: ...`,
+  Expected: `status = 'failed'`, `failure_reason` is EXACTLY
+  `Monime payout failed: Monime API error 500: drill: simulated outage`,
   `solana_tx_signature` is set (the on-chain leg already succeeded — see
   `triggerPayoutForWithdrawal`'s catch, which only touches `status` and
   `failure_reason`), `monime_payout_id` is still `null`.
