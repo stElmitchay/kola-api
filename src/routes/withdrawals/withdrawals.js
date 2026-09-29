@@ -13,7 +13,7 @@ import {
   sumWithdrawalsForPhoneSince,
   findPendingByWalletAndAmount
 } from '../../repos/withdrawals.js';
-import { getActiveRate } from '../../repos/exchange-rates.js';
+import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
 import {
   createValidationError,
   createNotFoundError,
@@ -43,7 +43,7 @@ function envInt(name, fallback) {
  *   sleMinor  = floor(sleFloat * 100)
  *
  * @param {number} usdcMinor
- * @param {number} rate - SLE per 1 USDC
+ * @param {BigNumber} rate - SLE per 1 USDC
  * @param {number} feeBps
  */
 function calculateSleAmount(usdcMinor, rate, feeBps) {
@@ -102,7 +102,8 @@ export async function initiateWithdrawal(params) {
   if (rateError || !rateData) {
     throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
   }
-  const rate = Number(rateData.rate);
+  assertRateFresh(rateData);
+  const rate = new BigNumber(rateData.rate);
   const feeBps = envInt('WITHDRAWAL_FEE_BPS', DEFAULT_FEE_BPS);
   const amountSle = calculateSleAmount(params.amountUsdc, rate, feeBps);
 
@@ -134,7 +135,7 @@ export async function initiateWithdrawal(params) {
     amount_usdc: params.amountUsdc,
     amount_sle: amountSle,
     fee_bps: feeBps,
-    exchange_rate: rate,
+    exchange_rate: rateData.rate,
     expires_at: expiresAt,
     metadata: params.metadata || {}
   });

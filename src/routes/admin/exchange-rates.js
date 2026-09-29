@@ -1,5 +1,6 @@
 //@ts-check
 
+import BigNumber from 'bignumber.js';
 import {
   getActiveRate,
   setRate as setRateRepo,
@@ -8,14 +9,32 @@ import {
 import { createDatabaseError, createValidationError } from '../../utils/errors.js';
 
 /**
- * Set a new exchange rate for an application
+ * Set a new exchange rate for an application. Refuses a move of more than
+ * RATE_MAX_MOVE_BPS off the current active rate unless opts.force is set —
+ * a fat-fingered rate is the single highest-blast-radius mistake an
+ * operator can make (F25).
  * @param {string} application
  * @param {number} rate - SLE per 1 USDC
  * @param {string} setBy
+ * @param {{ force?: boolean }} [opts]
  */
-export async function setExchangeRate(application, rate, setBy) {
+export async function setExchangeRate(application, rate, setBy, opts = {}) {
   if (rate <= 0) {
     throw createValidationError('Rate must be a positive number');
+  }
+
+  const maxMoveBps = parseInt(process.env.RATE_MAX_MOVE_BPS || '500', 10);
+  const { data: current } = await getActiveRate(application);
+  if (current && !opts.force) {
+    const prev = new BigNumber(current.rate);
+    const moveBps = new BigNumber(rate).minus(prev).abs()
+      .dividedBy(prev).multipliedBy(10_000);
+    if (moveBps.gt(maxMoveBps)) {
+      throw createValidationError(
+        `Rate move of ${moveBps.toFixed(0)}bps exceeds ${maxMoveBps}bps. ` +
+        `Re-submit with "force": true if intentional.`
+      );
+    }
   }
 
   const { data, error } = await setRateRepo(application, rate, setBy);

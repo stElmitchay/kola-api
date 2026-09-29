@@ -56,7 +56,7 @@ app.put('/exchange-rates', async (c) => {
     return c.json({ error: 'X-Application-Id header is required' }, 400);
   }
 
-  const rate = await setExchangeRate(applicationId, parsed.rate, parsed.setBy);
+  const rate = await setExchangeRate(applicationId, parsed.rate, parsed.setBy, { force: parsed.force });
 
   return c.json({
     message: 'Exchange rate updated',

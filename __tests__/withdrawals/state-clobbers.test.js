@@ -14,7 +14,9 @@ jest.unstable_mockModule('../../src/utils/monime.js', () => ({ createPayout }));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
   getTreasuryAddress: () => 'TREASURY', verifyIncomingUsdcTransfer: jest.fn()
 }));
-jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({ getActiveRate: jest.fn() }));
+jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({
+  getActiveRate: jest.fn(), assertRateFresh: jest.fn()
+}));
 
 const { confirmWithdrawal, triggerPayoutForWithdrawal } =
   await import('../../src/routes/withdrawals/withdrawals.js');
