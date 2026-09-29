@@ -71,6 +71,31 @@ test('named admin key "mitchel" authenticates and rate.set audit row carries act
   }));
 });
 
+test('PUT /exchange-rates without setBy in the body still succeeds and attributes the authenticated actor', async () => {
+  getActiveRate.mockResolvedValue({ data: { rate: '25', created_at: new Date().toISOString() }, error: null });
+  setRate.mockResolvedValue({ data: { rate: '26' }, error: null });
+
+  const res = await adminApp.request('/exchange-rates', {
+    method: 'PUT',
+    headers: {
+      'X-Admin-Key': 'mitchel-secret',
+      'X-Application-Id': 'app-1',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ rate: 26 }) // setBy deliberately omitted — deprecated field, wire-compat only
+  });
+
+  expect(res.status).toBe(200);
+  // p_set_by (via setRate's third arg) must still carry the authenticated actor
+  expect(setRate).toHaveBeenCalledWith('app-1', 26, 'mitchel');
+  expect(writeAudit).toHaveBeenCalledWith(expect.objectContaining({
+    actor: 'mitchel',
+    action: 'rate.set',
+    before: { rate: '25' },
+    after: { rate: '26' }
+  }));
+});
+
 test('DELETE /api-keys/:id writes an api_key.deactivate audit row and never logs the key hash', async () => {
   deactivateApiKey.mockResolvedValue({
     data: { id: 'key-1', name: 'Acme', key_hash: 'super-secret-hash-must-not-leak', is_active: false },
