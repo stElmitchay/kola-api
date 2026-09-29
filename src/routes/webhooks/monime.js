@@ -1,8 +1,8 @@
 //@ts-check
 
 import { Hono } from 'hono';
+import { waitUntil } from '@vercel/functions';
 import { verifyWebhookSignature } from '../../utils/monime.js';
-import { transferUsdc } from '../../utils/solana.js';
 import { getDepositById, updateDepositIfStatus } from '../../repos/deposits.js';
 import {
   getWithdrawalById,
@@ -10,6 +10,8 @@ import {
   updateWithdrawal
 } from '../../repos/withdrawals.js';
 import { recordWebhookEvent } from '../../repos/webhook-events.js';
+import { enqueueTransfer } from '../../repos/transfer-jobs.js';
+import { sweepOpenJobs, DEFAULT_SWEEP_LIMIT } from '../internal/transfer-tick.js';
 
 const app = new Hono();
 
@@ -169,16 +171,19 @@ async function handlePayoutEvent(c, eventName, data) {
 }
 
 /**
- * Handle a successful deposit — transfer USDC to the user's wallet.
- * CAS pending → processing is the claim: exactly one delivery of this
- * event (original, retry, or duplicate event name) wins the claim; every
- * other delivery sees data=null and returns without touching the chain.
+ * Handle a successful deposit — enqueue the USDC payout instead of sending
+ * it inline. CAS pending → confirmed is the claim: exactly one delivery of
+ * this event (original, retry, or duplicate event name) wins the claim;
+ * every other delivery sees data=null and returns without enqueueing a
+ * second job (enqueueTransfer is additionally idempotent on deposit_id).
+ * The actual transfer runs off-path in the transfer-tick worker (F9) —
+ * this keeps the webhook ack under a second regardless of RPC latency.
  * Exported for tests.
  * @param {object} deposit
  */
 export async function handleDepositSuccess(deposit) {
   const { data: claimed, error: claimErr } = await updateDepositIfStatus(
-    deposit.id, 'pending', { status: 'processing' }
+    deposit.id, 'pending', { status: 'confirmed' }
   );
   if (claimErr) {
     console.error(`[Webhook] Deposit ${deposit.id} claim failed: ${claimErr.message}`);
@@ -189,16 +194,19 @@ export async function handleDepositSuccess(deposit) {
     return;
   }
 
+  await enqueueTransfer({
+    depositId: deposit.id,
+    destination: claimed.wallet_address,
+    amountUsdc: claimed.amount_usdc
+  });
+
+  // Best-effort immediate kick so the payout doesn't sit idle until the next
+  // cron tick (up to 60s away). A missing/failing waitUntil must NEVER break
+  // the webhook path — the cron sweep processes anything missed regardless.
   try {
-    const txSignature = await transferUsdc(claimed.wallet_address, claimed.amount_usdc);
-    await updateDepositIfStatus(deposit.id, 'processing', {
-      status: 'completed', solana_tx_signature: txSignature
-    });
+    waitUntil(sweepOpenJobs(DEFAULT_SWEEP_LIMIT));
   } catch (error) {
-    console.error(`[Webhook] USDC transfer failed for deposit ${deposit.id}: ${error.message}`);
-    await updateDepositIfStatus(deposit.id, 'processing', {
-      status: 'failed', failure_reason: error.message
-    });
+    console.error(`[Webhook] waitUntil kick failed for deposit ${deposit.id}: ${error.message}`);
   }
 }
 

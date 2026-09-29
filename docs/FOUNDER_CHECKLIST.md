@@ -221,3 +221,78 @@ steps to actually apply and verify them against production.
    second response body is `{"received": true, "duplicate": true}`; only
    one row for that event appears in `webhook_events`; and no duplicate
    USDC transfer occurs.
+
+## Task B3 — apply 0014 + devnet kill-mid-send drill
+
+1. **Apply the transfer-jobs migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0014_transfer_jobs.sql
+   ```
+
+2. **Confirm the table and open-jobs index exist:**
+
+   ```sql
+   select indexname from pg_indexes
+     where tablename = 'transfer_jobs' and indexname = 'idx_transfer_jobs_open';
+   ```
+
+   Expected: one row (plus the primary key index and the `deposit_id`
+   unique constraint index).
+
+3. **Set `CRON_SECRET`** in Vercel (production + preview) and confirm the
+   `crons` entry in `vercel.json` (`POST /api/internal/transfer-tick`,
+   `* * * * *`) is deployed. Vercel signs its own cron requests with
+   `Authorization: Bearer $CRON_SECRET`; `X-Cron-Secret` also works for a
+   manual trigger, e.g.:
+
+   ```bash
+   curl -s -X POST "$API_BASE_URL/api/internal/transfer-tick" \
+     -H "X-Cron-Secret: $CRON_SECRET"
+   ```
+
+4. **Run the devnet kill-mid-send drill** — this is the proof that F9
+   (ambiguous RPC timeouts must never double-pay) actually holds against
+   a real cluster, not just mocks. Use devnet config (`USDC_MINT` +
+   `HELIUS_URL` devnet values, a funded devnet treasury) for all of this.
+
+   a. **Enqueue a job manually** against a real (devnet) deposit row that
+      is `confirmed`, e.g. via `psql`/SQL editor:
+
+      ```sql
+      insert into transfer_jobs (deposit_id, destination, amount_usdc)
+      values ('<a confirmed devnet deposit id>', '<a devnet wallet address>', 1000000);
+      ```
+
+   b. **Interrupt the process after `recordSignature` but before
+      confirmation lands.** The simplest way: temporarily set
+      `MAX_ATTEMPTS=1`-equivalent by killing the local `vercel dev` /
+      the deployed function process (e.g. `Ctrl-C` the dev server, or
+      redeploy mid-request) right after the worker log line showing the
+      signature was persisted (`recordSignature` succeeded) and before
+      `sendSerializedTransaction` / `finish` complete. Confirm via SQL
+      that the job is now `status = 'sending'` with a non-null
+      `signature`, `blockhash`, and `last_valid_block_height`:
+
+      ```sql
+      select id, status, signature, blockhash, last_valid_block_height
+        from transfer_jobs where deposit_id = '<the deposit id>';
+      ```
+
+   c. **Re-run the tick** (either wait for the next cron minute, or
+      trigger it manually with the curl command above).
+
+   d. **Verify exactly one transfer landed:**
+      - The job's `status` is `sent` and `signature` is unchanged from
+        step (b) — proving the worker completed the *original* signed
+        transaction rather than building a new one.
+      - The linked deposit is `completed` with `solana_tx_signature`
+        matching that same signature.
+      - On the devnet explorer (`https://explorer.solana.com/?cluster=devnet`),
+        search the signature: exactly one transaction exists, and the
+        destination wallet's USDC balance increased by exactly the
+        enqueued `amount_usdc` — not double.
+      - `buildSignedUsdcTransfer` was NOT called a second time (no second
+        signature ever appears on the job row).
