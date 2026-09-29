@@ -296,3 +296,27 @@ steps to actually apply and verify them against production.
         enqueued `amount_usdc` — not double.
       - `buildSignedUsdcTransfer` was NOT called a second time (no second
         signature ever appears on the job row).
+
+   e. **Concurrent-tick step (B3 review, Critical finding 1).** Enqueue a
+      second fresh job the same way as step (a). With the job sitting
+      `queued`, fire two tick requests at the same instant (e.g. two
+      parallel `curl` processes, or `xargs -P2`):
+
+      ```bash
+      for i in 1 2; do
+        curl -s -X POST "$API_BASE_URL/api/internal/transfer-tick" \
+          -H "X-Cron-Secret: $CRON_SECRET" &
+      done
+      wait
+      ```
+
+      Verify: exactly one `signature` was ever persisted on the job row
+      (check `transfer_jobs.signature` — it should never have changed
+      value mid-drill, i.e. no second UPDATE ever matched), the job ends
+      `sent`, the deposit ends `completed`, and the devnet explorer shows
+      exactly one transaction moving USDC to the destination wallet — not
+      two. This exercises `recordSignature`'s fence on observed
+      `(status, signature)`, which is what prevents two overlapping ticks
+      (the 1-minute cron overlapping the webhook's `waitUntil` kick, or
+      two cron invocations overlapping each other under load) from both
+      broadcasting a valid signed transaction for the same job.

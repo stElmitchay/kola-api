@@ -194,17 +194,26 @@ export async function handleDepositSuccess(deposit) {
     return;
   }
 
-  await enqueueTransfer({
+  const { error: enqueueErr } = await enqueueTransfer({
     depositId: deposit.id,
     destination: claimed.wallet_address,
     amountUsdc: claimed.amount_usdc
   });
+  if (enqueueErr) {
+    console.error(`[Webhook] enqueueTransfer failed for deposit ${deposit.id}: ${enqueueErr.message}`);
+  }
 
   // Best-effort immediate kick so the payout doesn't sit idle until the next
   // cron tick (up to 60s away). A missing/failing waitUntil must NEVER break
   // the webhook path — the cron sweep processes anything missed regardless.
+  // Both the synchronous call (waitUntil itself throwing, e.g. outside a
+  // Vercel execution context) and the async sweep it schedules are guarded.
   try {
-    waitUntil(sweepOpenJobs(DEFAULT_SWEEP_LIMIT));
+    waitUntil(
+      sweepOpenJobs(DEFAULT_SWEEP_LIMIT).catch((error) => {
+        console.error(`[Webhook] waitUntil kick's sweepOpenJobs failed for deposit ${deposit.id}: ${error.message}`);
+      })
+    );
   } catch (error) {
     console.error(`[Webhook] waitUntil kick failed for deposit ${deposit.id}: ${error.message}`);
   }

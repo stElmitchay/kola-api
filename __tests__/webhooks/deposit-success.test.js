@@ -34,7 +34,15 @@ const { handleDepositSuccess } = await import('../../src/routes/webhooks/monime.
 
 const deposit = { id: 'd-1', status: 'pending', wallet_address: 'WALLET', amount_usdc: 5_000_000 };
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Default happy-path resolution for the enqueue + best-effort kick so
+  // tests that don't care about them (most) don't have to stub every call;
+  // handleDepositSuccess destructures `{ error }` off both, so an
+  // un-stubbed bare jest.fn() (which resolves `undefined`) would throw.
+  enqueueTransfer.mockResolvedValue({ data: {}, error: null });
+  sweepOpenJobs.mockResolvedValue(0);
+});
 
 test('claims via CAS pending -> confirmed before enqueueing, exactly once', async () => {
   updateDepositIfStatus.mockResolvedValueOnce({ data: { ...deposit, status: 'confirmed' }, error: null }); // claim
@@ -61,6 +69,13 @@ test('a claim-read error does NOT enqueue', async () => {
   updateDepositIfStatus.mockResolvedValueOnce({ data: null, error: new Error('db down') });
   await handleDepositSuccess(deposit);
   expect(enqueueTransfer).not.toHaveBeenCalled();
+});
+
+test('an enqueueTransfer error is logged but does not throw', async () => {
+  updateDepositIfStatus.mockResolvedValueOnce({ data: { ...deposit, status: 'confirmed' }, error: null });
+  enqueueTransfer.mockResolvedValueOnce({ data: null, error: new Error('db down') });
+
+  await expect(handleDepositSuccess(deposit)).resolves.toBeUndefined();
 });
 
 test('a failing waitUntil kick never breaks the webhook path', async () => {

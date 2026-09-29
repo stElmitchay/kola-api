@@ -50,7 +50,13 @@ const deposit = {
   id: 'd-1', status: 'pending', amount_sle: 10_000, amount_usdc: 4_000_000, wallet_address: 'W'
 };
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  // handleDepositSuccess destructures `{ error }` off both of these — an
+  // un-stubbed bare jest.fn() resolves `undefined` and would throw.
+  enqueueTransfer.mockResolvedValue({ data: {}, error: null });
+  sweepOpenJobs.mockResolvedValue(0);
+});
 
 test('a duplicate event_id is acked 200 and processes nothing', async () => {
   recordWebhookEvent.mockResolvedValue({ isNew: false });
