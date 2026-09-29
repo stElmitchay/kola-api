@@ -16,6 +16,9 @@ jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
   getWithdrawalById: jest.fn(), getWithdrawalByMonimePayoutId: jest.fn(),
   updateWithdrawal: jest.fn()
 }));
+jest.unstable_mockModule('../../src/repos/webhook-events.js', () => ({
+  recordWebhookEvent: jest.fn()
+}));
 
 const { handleDepositSuccess } = await import('../../src/routes/webhooks/monime.js');
 

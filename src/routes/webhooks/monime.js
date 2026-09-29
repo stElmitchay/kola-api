@@ -9,6 +9,7 @@ import {
   getWithdrawalByMonimePayoutId,
   updateWithdrawal
 } from '../../repos/withdrawals.js';
+import { recordWebhookEvent } from '../../repos/webhook-events.js';
 
 const app = new Hono();
 
@@ -23,6 +24,13 @@ app.post('/', async (c) => {
 
   const payload = JSON.parse(rawBody);
   const eventName = payload.event?.name || '';
+  // ASSUMPTION(V-A): verify against docs/fixtures/monime/ — fixture wins
+  const eventId = payload.event?.id;
+
+  const { isNew } = await recordWebhookEvent('monime', eventId, eventName, payload, rawBody);
+  if (!isNew) {
+    return c.json({ received: true, duplicate: true });
+  }
 
   console.log(`[Webhook] Received event: ${eventName}`);
 
@@ -34,7 +42,7 @@ app.post('/', async (c) => {
       console.error('[Webhook] No reference in deposit payload');
       return c.json({ received: true });
     }
-    return handleDepositEvent(c, eventName, reference);
+    return handleDepositEvent(c, eventName, reference, payload);
   }
 
   if (eventName.startsWith('payout.')) {
@@ -49,8 +57,9 @@ app.post('/', async (c) => {
  * @param {any} c
  * @param {string} eventName
  * @param {string} reference
+ * @param {any} payload
  */
-async function handleDepositEvent(c, eventName, reference) {
+async function handleDepositEvent(c, eventName, reference, payload) {
   const { data: deposit, error } = await getDepositById(reference);
 
   if (error || !deposit) {
@@ -63,6 +72,12 @@ async function handleDepositEvent(c, eventName, reference) {
     return c.json({ received: true });
   }
 
+  // 'payment_code.processed' is kept alongside 'completed' deliberately —
+  // see the "Standing decision" in docs/fixtures/monime/README.md. Without
+  // fixture evidence that both fire for one payment, removing it risks
+  // stranding USSD deposits whose only terminal event might be 'processed';
+  // the A3 CAS claim in handleDepositSuccess already makes a double-fire
+  // from both events arriving harmless.
   const successEvents = [
     'checkout_session.completed',
     'payment_code.completed',
@@ -76,6 +91,16 @@ async function handleDepositEvent(c, eventName, reference) {
   ];
 
   if (successEvents.includes(eventName)) {
+    // ASSUMPTION(V-A): verify against docs/fixtures/monime/ — fixture wins
+    const paid = payload.data?.amount?.value; // SLE minor units
+    if (typeof paid !== 'number' || paid !== Number(deposit.amount_sle)) {
+      await updateDepositIfStatus(deposit.id, 'pending', {
+        status: 'amount_mismatch',
+        failure_reason: `collected=${paid ?? 'absent'} quoted=${deposit.amount_sle}`
+      });
+      console.error(`[Webhook] AMOUNT MISMATCH deposit=${deposit.id}`); // C4 upgrades this to a paged alert
+      return c.json({ received: true });
+    }
     await handleDepositSuccess(deposit);
   } else if (expiryEvents.includes(eventName)) {
     await updateDepositIfStatus(deposit.id, 'pending', { status: 'expired' });

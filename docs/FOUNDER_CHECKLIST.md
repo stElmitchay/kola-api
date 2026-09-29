@@ -170,3 +170,54 @@ steps to actually apply and verify them against production.
    - First two UPDATEs must fail with `ILLEGAL_DEPOSIT_TRANSITION` and
      `ILLEGAL_WITHDRAWAL_TRANSITION` errors.
    - Third UPDATE must succeed (legal `pending → processing` transition).
+
+## Task B2 — capture Monime fixtures + verify field paths + apply migration 0013
+
+1. **Capture the fixtures.** Live capture wasn't possible in the
+   sandboxed environment this work was done in. Follow
+   `docs/fixtures/monime/README.md`: point a devnet/test Monime webhook
+   at a capture endpoint (or pull from the dashboard event log) and save
+   one verbatim JSON body each for `checkout_session.completed`,
+   `payment_code.completed`, `payment_code.processed` (if it exists),
+   `payout.completed`, and `payout.failed` into `docs/fixtures/monime/`.
+
+2. **Verify the two field-path assumptions the code currently makes**
+   (both marked `// ASSUMPTION(V-A)` in
+   `src/routes/webhooks/monime.js` — grep for `ASSUMPTION(V-A)`):
+   - Event id is read from `payload.event.id`.
+   - Collected amount is read from `payload.data.amount.value`, treated
+     as SLE minor units.
+
+   **The fixture wins.** If a captured payload contradicts either path
+   or the units, fix the code at that `ASSUMPTION(V-A)` line to match
+   the fixture — do not adjust the fixture to match the code. Also
+   confirm whether `payment_code.processed` and `payment_code.completed`
+   both fire for a single payment; see the "Standing decision" section
+   in `docs/fixtures/monime/README.md` for why `processed` was kept in
+   `successEvents` without this confirmation, and revisit it once
+   confirmed.
+
+3. **Apply the webhook-events migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0013_webhook_events.sql
+   ```
+
+4. **Confirm the table and unique constraint exist:**
+
+   ```sql
+   select indexname from pg_indexes
+     where tablename = 'webhook_events';
+   ```
+
+   Expected: the primary key index plus a unique index covering
+   `(provider, event_id)`.
+
+5. **Prove the exactly-once gate works end-to-end** by replaying the
+   same signed webhook body (same `Monime-Signature` header and body) at
+   the live endpoint twice. Expected: both requests return `200`; the
+   second response body is `{"received": true, "duplicate": true}`; only
+   one row for that event appears in `webhook_events`; and no duplicate
+   USDC transfer occurs.
