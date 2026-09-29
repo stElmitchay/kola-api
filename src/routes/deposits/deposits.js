@@ -2,7 +2,7 @@
 
 import BigNumber from 'bignumber.js';
 import { validatePhoneNumber } from '../../utils/validation.js';
-import { deriveWalletFromPhone } from '../../utils/solana.js';
+import { deriveWalletFromPhone, getTreasuryUsdcBalanceMinor } from '../../utils/solana.js';
 import { createCheckoutSession, createPaymentCode } from '../../utils/monime.js';
 import {
   createDeposit as createDepositRepo,
@@ -17,6 +17,17 @@ import {
   createNotFoundError,
   createDatabaseError
 } from '../../utils/errors.js';
+
+/**
+ * @param {string} name
+ * @param {number} fallback
+ */
+function envInt(name, fallback) {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 /**
  * Calculate USDC amount from SLE amount and exchange rate
@@ -83,11 +94,27 @@ export async function initiateDeposit(params) {
     throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
   }
 
+  const maxSle = envInt('DEPOSIT_MAX_SLE', 500_000);        // 5,000.00 SLE default
+  const minSle = envInt('DEPOSIT_MIN_SLE', 100);            // 1.00 SLE default
+  if (params.amount > maxSle) {
+    throw createValidationError(`Amount exceeds maximum (${maxSle} minor units)`);
+  }
+  if (params.amount < minSle) {
+    throw createValidationError(`Amount below minimum (${minSle} minor units)`);
+  }
+
   const rate = Number(rateData.rate);
   const amountUsdc = calculateUsdcAmount(params.amount, rate);
 
   if (amountUsdc <= 0) {
     throw createValidationError('Amount too small to convert to USDC');
+  }
+
+  const treasuryBalance = await getTreasuryUsdcBalanceMinor();
+  if (treasuryBalance < BigInt(amountUsdc)) {
+    // Never quote a deposit the treasury cannot settle. Generic message on
+    // purpose: the exact float level is operational information.
+    throw createValidationError('Deposits are temporarily unavailable. Please try again later.');
   }
 
   const wallet = await resolveWalletAddress(
