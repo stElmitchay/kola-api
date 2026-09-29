@@ -11,6 +11,8 @@ docs/*
 !docs/fixtures/**
 !docs/runbooks/
 !docs/runbooks/**
+!docs/game-days/
+!docs/game-days/**
 !docs/decisions/
 !docs/decisions/**
 .DS_Store
