@@ -23,12 +23,13 @@ export async function requestContext(c, next) {
   const latencyMs = Date.now() - start;
 
   const application = c.get('application');
+  // request_id is already bound via logger.child() above — don't pass it
+  // again here, or it'd appear twice in the JSON line.
   log.info({
     route: c.req.routePath,
     method: c.req.method,
     status: c.res.status,
     latency_ms: latencyMs,
-    request_id: requestId,
     ...(application ? { application } : {})
   }, 'request completed');
 }

@@ -3,6 +3,7 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { createMonimeError } from './errors.js';
 import { logger } from './logger.js';
+import { envInt } from './config.js';
 
 const BASE_URL = 'https://api.monime.io';
 
@@ -26,7 +27,7 @@ async function monimeRequest(method, path, body, idempotencyKey) {
     headers['Idempotency-Key'] = idempotencyKey;
   }
 
-  const timeoutMs = parseInt(process.env.MONIME_TIMEOUT_MS || '15000', 10);
+  const timeoutMs = envInt('MONIME_TIMEOUT_MS');
 
   let response;
   try {
@@ -46,11 +47,6 @@ async function monimeRequest(method, path, body, idempotencyKey) {
   const data = await response.json();
 
   if (!response.ok) {
-    // Log everything Monime gave us so we can debug field-shape issues.
-    // Structured (not string-concatenated) so the logger's redaction can
-    // strip phone_number/wallet_address if Monime echoes them back in an
-    // error payload (e.g. a rejected payout destination).
-    logger.error({ status: response.status, path, method, response: data }, '[Monime] request failed');
     // Surface as much detail as possible
     const detail =
       (Array.isArray(data.messages) && data.messages.join(', ')) ||
@@ -58,6 +54,15 @@ async function monimeRequest(method, path, body, idempotencyKey) {
       data.error?.message ||
       data.message ||
       JSON.stringify(data);
+    // Deliberately do NOT log the raw vendor `data` object: its shape is
+    // whatever Monime sends back (arbitrary, unversioned), so it can nest
+    // a rejected payout's phone/wallet destination at any depth. The
+    // logger's redact paths only match an exact, fixed depth (verified:
+    // pino/fast-redact wildcards like '*.*.phone_number' match exactly
+    // two levels of nesting, not "at any depth") — they can't reliably
+    // cover a shape we don't control. Log only the derived `detail`
+    // string (error codes/messages) plus request metadata instead.
+    logger.error({ status: response.status, path, method, detail }, '[Monime] request failed');
     throw createMonimeError(`Monime API error ${response.status}: ${detail}`);
   }
 
