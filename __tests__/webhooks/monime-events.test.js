@@ -61,6 +61,19 @@ test('a duplicate event_id is acked 200 and processes nothing', async () => {
   expect(getDepositById).not.toHaveBeenCalled();
 });
 
+test('a gate error returns 503 with Retry-After so Monime retries instead of a silent drop', async () => {
+  recordWebhookEvent.mockResolvedValue({ isNew: false, error: { message: 'db down' } });
+
+  const res = await post({
+    event: { id: 'evt-1', name: 'payment_code.completed' },
+    data: { reference: 'd-1', amount: { value: 10_000 } }
+  });
+
+  expect(res.status).toBe(503);
+  expect(res.headers.get('Retry-After')).toBe('60');
+  expect(getDepositById).not.toHaveBeenCalled();
+});
+
 test('Review Focus #1: collected amount != quoted amount parks the deposit, never transfers', async () => {
   recordWebhookEvent.mockResolvedValue({ isNew: true });
   getDepositById.mockResolvedValue({ data: { ...deposit }, error: null });
