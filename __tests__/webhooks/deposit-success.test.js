@@ -9,6 +9,7 @@ const updateDeposit = jest.fn();
 const enqueueTransfer = jest.fn();
 const sweepOpenJobs = jest.fn();
 const waitUntil = jest.fn();
+const postDepositCollection = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/deposits.js', () => ({
   updateDepositIfStatus, updateDeposit,
@@ -29,6 +30,12 @@ jest.unstable_mockModule('../../src/routes/internal/transfer-tick.js', () => ({
   sweepOpenJobs, DEFAULT_SWEEP_LIMIT: 20, processJob: jest.fn(), default: {}
 }));
 jest.unstable_mockModule('@vercel/functions', () => ({ waitUntil }));
+// B4: deposit_collection posts after the CAS claim, before enqueueTransfer.
+// postWithdrawalPayout is unused by handleDepositSuccess but monime.js
+// imports it too, so it must be present on the mocked module.
+jest.unstable_mockModule('../../src/repos/ledger.js', () => ({
+  postDepositCollection, postWithdrawalPayout: jest.fn()
+}));
 
 const { handleDepositSuccess } = await import('../../src/routes/webhooks/monime.js');
 
@@ -45,13 +52,16 @@ beforeEach(() => {
 });
 
 test('claims via CAS pending -> confirmed before enqueueing, exactly once', async () => {
-  updateDepositIfStatus.mockResolvedValueOnce({ data: { ...deposit, status: 'confirmed' }, error: null }); // claim
+  const claimed = { ...deposit, status: 'confirmed' };
+  updateDepositIfStatus.mockResolvedValueOnce({ data: claimed, error: null }); // claim
   sweepOpenJobs.mockResolvedValueOnce(1);
 
   await handleDepositSuccess(deposit);
 
   expect(updateDepositIfStatus).toHaveBeenCalledTimes(1);
   expect(updateDepositIfStatus).toHaveBeenCalledWith('d-1', 'pending', { status: 'confirmed' });
+  // B4: deposit_collection posts after the claim, before enqueueTransfer.
+  expect(postDepositCollection).toHaveBeenCalledWith(claimed);
   expect(enqueueTransfer).toHaveBeenCalledTimes(1);
   expect(enqueueTransfer).toHaveBeenCalledWith({
     depositId: 'd-1', destination: 'WALLET', amountUsdc: 5_000_000

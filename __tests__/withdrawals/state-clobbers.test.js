@@ -4,6 +4,7 @@ const updateWithdrawal = jest.fn();
 const updateWithdrawalIfStatus = jest.fn();
 const createPayout = jest.fn();
 const getWithdrawalRepo = jest.fn();
+const postWithdrawalReceipt = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
   createWithdrawal: jest.fn(), getWithdrawal: getWithdrawalRepo,
@@ -17,6 +18,9 @@ jest.unstable_mockModule('../../src/utils/solana.js', () => ({
 jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({
   getActiveRate: jest.fn(), assertRateFresh: jest.fn()
 }));
+// B4: withdrawal_receipt posts right after the pending_deposit -> received
+// CAS claim succeeds in confirmWithdrawal.
+jest.unstable_mockModule('../../src/repos/ledger.js', () => ({ postWithdrawalReceipt }));
 
 const { confirmWithdrawal, triggerPayoutForWithdrawal } =
   await import('../../src/routes/withdrawals/withdrawals.js');

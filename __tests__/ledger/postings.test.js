@@ -1,0 +1,144 @@
+import { jest } from '@jest/globals';
+import BigNumber from 'bignumber.js';
+
+const rpc = jest.fn();
+
+jest.unstable_mockModule('../../src/utils/supabase.js', () => ({
+  createSupabaseClient: () => ({ rpc })
+}));
+
+const {
+  postDepositCollection, postDepositPayout, postWithdrawalReceipt, postWithdrawalPayout
+} = await import('../../src/repos/ledger.js');
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  rpc.mockResolvedValue({ data: null, error: null });
+});
+
+// Hard-coded from migration 0015's seed — the account -> currency map the
+// balance checks below are computed against.
+const ACCOUNT_CURRENCY = {
+  treasury_usdc: 'USDC',
+  user_payable_usdc: 'USDC',
+  monime_sle: 'SLE',
+  user_payable_sle: 'SLE',
+  fee_income_sle: 'SLE',
+  fx_usdc: 'USDC',
+  fx_sle: 'SLE',
+  suspense_usdc: 'USDC'
+};
+
+/** Assert that the entries of a post_journal call balance per currency. */
+function assertBalancedPerCurrency(entries) {
+  const totals = {};
+  for (const e of entries) {
+    const currency = ACCOUNT_CURRENCY[e.account];
+    expect(currency).toBeDefined();
+    totals[currency] ??= { debit: 0n, credit: 0n };
+    totals[currency][e.direction] += BigInt(e.amount);
+  }
+  for (const [currency, { debit, credit }] of Object.entries(totals)) {
+    expect(debit).toBe(credit);
+  }
+}
+
+test('deposit payout posts a balanced USDC journal exactly once', async () => {
+  await postDepositPayout({ id: 'd1', amount_usdc: 5_000_000 });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'deposit_payout', p_resource_type: 'deposit', p_resource_id: 'd1',
+    p_idempotency_key: 'deposit_payout:d1',
+    p_entries: [
+      { account: 'user_payable_usdc', direction: 'debit', amount: '5000000' },
+      { account: 'treasury_usdc', direction: 'credit', amount: '5000000' }
+    ]
+  });
+  expect(rpc).toHaveBeenCalledTimes(1);
+  assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
+});
+
+test('deposit collection posts the four-entry cross-currency journal, balanced per currency', async () => {
+  await postDepositCollection({ id: 'd2', amount_sle: 10_000, amount_usdc: 4_000_000 });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'deposit_collection', p_resource_type: 'deposit', p_resource_id: 'd2',
+    p_idempotency_key: 'deposit_collection:d2',
+    p_entries: [
+      { account: 'monime_sle', direction: 'debit', amount: '10000' },
+      { account: 'fx_sle', direction: 'credit', amount: '10000' },
+      { account: 'fx_usdc', direction: 'debit', amount: '4000000' },
+      { account: 'user_payable_usdc', direction: 'credit', amount: '4000000' }
+    ]
+  });
+  assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
+});
+
+test('withdrawal receipt (gross present) posts the USDC pair plus the SLE fee-split trio, balanced per currency', async () => {
+  await postWithdrawalReceipt({
+    id: 'w1', amount_usdc: 5_000_000, amount_sle: 12_375, amount_sle_gross: 12_500
+  });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'withdrawal_receipt', p_resource_type: 'withdrawal', p_resource_id: 'w1',
+    p_idempotency_key: 'withdrawal_receipt:w1',
+    p_entries: [
+      { account: 'treasury_usdc', direction: 'debit', amount: '5000000' },
+      { account: 'fx_usdc', direction: 'credit', amount: '5000000' },
+      { account: 'fx_sle', direction: 'debit', amount: '12500' },
+      { account: 'user_payable_sle', direction: 'credit', amount: '12375' },
+      { account: 'fee_income_sle', direction: 'credit', amount: '125' }
+    ]
+  });
+  assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
+});
+
+test('withdrawal receipt (gross absent, pre-0015 row) posts ONLY the balanced USDC pair and logs a backfill notice', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  await postWithdrawalReceipt({ id: 'w2', amount_usdc: 5_000_000, amount_sle: 12_375, amount_sle_gross: null });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'withdrawal_receipt', p_resource_type: 'withdrawal', p_resource_id: 'w2',
+    p_idempotency_key: 'withdrawal_receipt:w2',
+    p_entries: [
+      { account: 'treasury_usdc', direction: 'debit', amount: '5000000' },
+      { account: 'fx_usdc', direction: 'credit', amount: '5000000' }
+    ]
+  });
+  assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
+  expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('w2'));
+  errorSpy.mockRestore();
+});
+
+test('withdrawal payout posts a balanced SLE journal exactly once', async () => {
+  await postWithdrawalPayout({ id: 'w3', amount_sle: 12_375 });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'withdrawal_payout', p_resource_type: 'withdrawal', p_resource_id: 'w3',
+    p_idempotency_key: 'withdrawal_payout:w3',
+    p_entries: [
+      { account: 'user_payable_sle', direction: 'debit', amount: '12375' },
+      { account: 'monime_sle', direction: 'credit', amount: '12375' }
+    ]
+  });
+  assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
+});
+
+test('a posting failure (rpc rejects) does not throw out of the helper', async () => {
+  rpc.mockRejectedValueOnce(new Error('connection reset'));
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  await expect(postDepositPayout({ id: 'd3', amount_usdc: 1_000_000 })).resolves.toBeUndefined();
+  expect(errorSpy).toHaveBeenCalled();
+  errorSpy.mockRestore();
+});
+
+test('a posting failure ({error} from rpc) does not throw out of the helper', async () => {
+  rpc.mockResolvedValueOnce({ data: null, error: new Error('unbalanced journal') });
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  await expect(postWithdrawalPayout({ id: 'w4', amount_sle: 100 })).resolves.toBeUndefined();
+  expect(errorSpy).toHaveBeenCalled();
+  errorSpy.mockRestore();
+});
+
+describe('calculateSleAmount', () => {
+  test('5 USDC @ rate 25, fee 100bps -> gross 12500, net 12375', async () => {
+    const { calculateSleAmount } = await import('../../src/routes/withdrawals/withdrawals.js');
+    const result = calculateSleAmount(5_000_000, new BigNumber(25), 100);
+    expect(result).toEqual({ gross: 12500, net: 12375 });
+  });
+});

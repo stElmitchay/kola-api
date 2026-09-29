@@ -320,3 +320,86 @@ steps to actually apply and verify them against production.
       (the 1-minute cron overlapping the webhook's `waitUntil` kick, or
       two cron invocations overlapping each other under load) from both
       broadcasting a valid signed transaction for the same job.
+
+## Task B4 — apply 0015 + ledger verification queries
+
+1. **Apply the ledger migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0015_ledger.sql
+   ```
+
+2. **Confirm the tables, triggers, and function landed, and that the
+   posting RPC is locked down to the service role:**
+
+   ```sql
+   select table_name from information_schema.tables
+     where table_name in ('ledger_accounts', 'ledger_journals', 'ledger_entries');
+   -- Expected: 3 rows
+
+   select trigger_name from information_schema.triggers
+     where event_object_table in ('ledger_entries', 'ledger_journals');
+   -- Expected: trg_entries_immutable, trg_journals_immutable, trg_journal_balanced
+
+   select has_function_privilege('anon', 'post_journal(text,text,uuid,text,jsonb)', 'execute');
+   -- Expected: false
+   ```
+
+3. **Run one full deposit and one full withdrawal** end-to-end on devnet
+   (`USDC_MINT` + `HELIUS_URL` devnet values), then run the proof queries
+   below (Supabase SQL editor, service role).
+
+   **Every journal balances per currency** (must return zero rows — the
+   deferred constraint trigger should already make this impossible, but
+   confirm no journal slipped through with mismatched debits/credits):
+
+   ```sql
+   select j.id, j.kind, a.currency,
+          sum(case when e.direction = 'debit'  then e.amount else 0 end) as debits,
+          sum(case when e.direction = 'credit' then e.amount else 0 end) as credits
+     from ledger_journals j
+     join ledger_entries e on e.journal_id = j.id
+     join ledger_accounts a on a.id = e.account
+    group by j.id, j.kind, a.currency
+   having sum(case when e.direction = 'debit'  then e.amount else 0 end)
+       <> sum(case when e.direction = 'credit' then e.amount else 0 end);
+   ```
+
+   **`treasury_usdc` ledger balance vs. on-chain delta.** Compute the
+   ledger-side net movement of the `treasury_usdc` account since the drill
+   started (a `deposit_payout` debits treasury when a USDC payout lands; a
+   `withdrawal_receipt` credits treasury when incoming USDC is verified):
+
+   ```sql
+   select
+     sum(case when e.direction = 'debit' then e.amount else -e.amount end)
+       as treasury_usdc_ledger_net_minor
+     from ledger_entries e
+     join ledger_accounts a on a.id = e.account
+    where a.code = 'treasury_usdc'
+      and e.created_at >= '<drill start timestamp>';
+   ```
+
+   Compare `treasury_usdc_ledger_net_minor` against the treasury wallet's
+   actual USDC balance delta over the same window (devnet explorer, or
+   `getTreasuryUsdcBalanceMinor` sampled before/after the drill). Expected:
+   they match exactly — the deposit payout's debit and the withdrawal
+   receipt's credit should account for every USDC minor unit that moved
+   on-chain.
+
+4. **Spot-check the `withdrawal_receipt` gross-fallback path is not
+   silently firing in production.** Any withdrawal created before this
+   migration landed lacks `amount_sle_gross`, and its receipt journal posts
+   the USDC leg only (by design — see the ruling in `src/repos/ledger.js`).
+   Confirm none of the withdrawals settled during the drill hit this path:
+
+   ```sql
+   select id from withdrawals where amount_sle_gross is null and status <> 'pending_deposit';
+   ```
+
+   Expected: no rows for withdrawals created after 0015 was applied. Any
+   pre-existing rows found here are expected and already logged via
+   `console.error` at posting time — no action required unless an operator
+   wants to manually backfill their SLE-side ledger entries.

@@ -14,6 +14,7 @@ import {
   findPendingByWalletAndAmount
 } from '../../repos/withdrawals.js';
 import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
+import { postWithdrawalReceipt } from '../../repos/ledger.js';
 import {
   createValidationError,
   createNotFoundError,
@@ -34,24 +35,31 @@ function envInt(name, fallback) {
 }
 
 /**
- * Calculate the SLE delivered after the withdrawal fee.
- *   sleMinor = usdcMinor * rate * (10000 - feeBps) / 10000 / 1e6 * 100
+ * Calculate the gross (pre-fee) and net (post-fee) SLE for a withdrawal.
+ *   grossMinor = floor(usdc * rate * 100)
+ *   netMinor   = floor(usdc * rate * (10000 - feeBps) / 10000 * 100)
  *
  * Layout (each variable in *minor units*):
  *   usdcMinor (1 USDC = 1_000_000) -> usdc = usdcMinor / 1e6
- *   sleFloat  = usdc * rate * (1 - fee)
- *   sleMinor  = floor(sleFloat * 100)
+ *   grossSle  = usdc * rate
+ *   netSle    = grossSle * (1 - fee)
+ *
+ * The gross figure is persisted (`amount_sle_gross`) so the ledger can
+ * split the withdrawal fee into its own income account at posting time
+ * (fee = gross - net) without recomputing the exchange-rate math later.
  *
  * @param {number} usdcMinor
  * @param {BigNumber} rate - SLE per 1 USDC
  * @param {number} feeBps
+ * @returns {{ net: number, gross: number }}
  */
-function calculateSleAmount(usdcMinor, rate, feeBps) {
+export function calculateSleAmount(usdcMinor, rate, feeBps) {
   const usdc = new BigNumber(usdcMinor).dividedBy(1_000_000);
   const grossSle = usdc.multipliedBy(rate);
+  const grossMinor = grossSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
   const netSle = grossSle.multipliedBy(10000 - feeBps).dividedBy(10000);
-  const sleMinor = netSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
-  return sleMinor.toNumber();
+  const netMinor = netSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
+  return { net: netMinor.toNumber(), gross: grossMinor.toNumber() };
 }
 
 /**
@@ -105,7 +113,7 @@ export async function initiateWithdrawal(params) {
   assertRateFresh(rateData);
   const rate = new BigNumber(rateData.rate);
   const feeBps = envInt('WITHDRAWAL_FEE_BPS', DEFAULT_FEE_BPS);
-  const amountSle = calculateSleAmount(params.amountUsdc, rate, feeBps);
+  const { net: amountSle, gross: amountSleGross } = calculateSleAmount(params.amountUsdc, rate, feeBps);
 
   if (amountSle <= 0) {
     throw createValidationError('Amount too small to produce any SLE after fee');
@@ -134,6 +142,7 @@ export async function initiateWithdrawal(params) {
     provider_code: params.providerCode,
     amount_usdc: params.amountUsdc,
     amount_sle: amountSle,
+    amount_sle_gross: amountSleGross,
     fee_bps: feeBps,
     exchange_rate: rateData.rate,
     expires_at: expiresAt,
@@ -221,6 +230,8 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
       return getWithdrawalStatus(id, application);
     }
     workingRow = claimed;
+
+    await postWithdrawalReceipt(claimed);
   }
 
   await triggerPayoutForWithdrawal(workingRow, isPayoutRetry ? 'failed' : 'received');

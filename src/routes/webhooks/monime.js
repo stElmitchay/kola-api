@@ -12,6 +12,7 @@ import {
 import { recordWebhookEvent } from '../../repos/webhook-events.js';
 import { enqueueTransfer } from '../../repos/transfer-jobs.js';
 import { sweepOpenJobs, DEFAULT_SWEEP_LIMIT } from '../internal/transfer-tick.js';
+import { postDepositCollection, postWithdrawalPayout } from '../../repos/ledger.js';
 
 const app = new Hono();
 
@@ -153,6 +154,7 @@ async function handlePayoutEvent(c, eventName, data) {
       console.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as completed: ${writeErr.message}`);
     } else {
       console.log(`[Webhook] Withdrawal ${withdrawal.id} completed`);
+      await postWithdrawalPayout(withdrawal);
     }
   } else if (eventName === 'payout.failed') {
     const reason = data?.failureDetail?.message || data?.failureDetail?.code || 'Monime payout failed';
@@ -193,6 +195,8 @@ export async function handleDepositSuccess(deposit) {
     console.log(`[Webhook] Deposit ${deposit.id} already claimed, skipping`);
     return;
   }
+
+  await postDepositCollection(claimed);
 
   const { error: enqueueErr } = await enqueueTransfer({
     depositId: deposit.id,

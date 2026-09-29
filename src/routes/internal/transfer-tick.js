@@ -8,6 +8,7 @@ import { updateDepositIfStatus } from '../../repos/deposits.js';
 import {
   buildSignedUsdcTransfer, checkSignatureLanded, sendSerializedTransaction, getCurrentBlockHeight
 } from '../../utils/solana.js';
+import { postDepositPayout } from '../../repos/ledger.js';
 
 const MAX_ATTEMPTS = 5;
 // ~13s margin (32 slots) against load-balanced RPC backends disagreeing on
@@ -177,7 +178,7 @@ async function finish(job, signature) {
   if (completedErr) {
     console.error(`[TransferTick] deposit ${job.deposit_id} processing->completed CAS error: ${completedErr.message}`);
   }
-  // B4 wires postJournal('deposit_payout', ...) here.
+  await postDepositPayout({ id: job.deposit_id, amount_usdc: job.amount_usdc });
 }
 
 export default app;
