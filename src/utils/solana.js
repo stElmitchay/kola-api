@@ -202,6 +202,24 @@ export async function verifyIncomingUsdcTransfer(txSignature, expectedFromWallet
 }
 
 /**
+ * Treasury ATA balance in USDC minor units. Used as a payout precondition
+ * and by the reconciliation job.
+ * @returns {Promise<bigint>}
+ */
+export async function getTreasuryUsdcBalanceMinor() {
+  const connection = getConnection();
+  const treasury = getTreasuryKeypair();
+  const usdcMint = getUsdcMint();
+  const ata = await getAssociatedTokenAddress(usdcMint, treasury.publicKey);
+  try {
+    const account = await getAccount(connection, ata);
+    return account.amount; // bigint, already minor units
+  } catch {
+    return 0n;
+  }
+}
+
+/**
  * Get USDC balance for a wallet address
  * @param {string} walletAddress - Solana wallet address (base58)
  * @returns {Promise<{ balance: string, rawBalance: string }>}
