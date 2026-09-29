@@ -839,3 +839,23 @@ outstanding is deploying it and watching the first few live runs.
    `exchange_rates.set_by` and to `audit_log.actor`. No client change is
    required immediately, but `setBy` can be dropped from future client
    requests — it does nothing.
+
+## Task C3 — provision Upstash + set env
+
+1. **Provision Upstash Redis** via the Vercel Marketplace integration and
+   land `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` in Vercel
+   (production + preview) and in local `.env` — see `.env.example`.
+
+2. Per-key rate limiting (`auth_api_keys.rate_limit`, requests/minute,
+   default 100) is enforced by `src/middleware/rate-limit.js` on the
+   `wallets`, `deposits`, and `withdrawals` routers, mounted after
+   `apiKeyAuth` and before the per-route idempotency middleware. Until the
+   env vars above are set, the middleware fails open (passes every request
+   through, logs one `console.warn`) — no client-visible change happens
+   until Upstash is actually provisioned.
+
+3. **Confirm enforcement end-to-end** once the env vars are set: fire
+   requests past a key's `rate_limit` within a minute and confirm a `429`
+   with `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`
+   and `Retry-After` headers, then confirm the count resets after the
+   sliding window rolls over.

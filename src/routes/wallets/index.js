@@ -2,12 +2,14 @@
 
 import { Hono } from 'hono';
 import { apiKeyAuth } from '../../middleware/api-key-auth.js';
+import { rateLimit } from '../../middleware/rate-limit.js';
 import { errorHandler } from '../../middleware/error-handler.js';
 import { fetchWalletBalance } from './wallets.js';
 
 const app = new Hono();
 
 app.use('/*', apiKeyAuth);
+app.use('/*', rateLimit);
 app.onError(errorHandler);
 
 // F4: phone-derived addresses have no private key — USDC sent to them is
