@@ -1,6 +1,5 @@
 //@ts-check
 import { Hono } from 'hono';
-import { timingSafeEqual, createHash } from 'crypto';
 import {
   listOpenJobs, recordSignature, markSent, markFailedPermanent, bumpAttempt
 } from '../../repos/transfer-jobs.js';
@@ -9,6 +8,7 @@ import {
   buildSignedUsdcTransfer, checkSignatureLanded, sendSerializedTransaction, getCurrentBlockHeight
 } from '../../utils/solana.js';
 import { postDepositPayout } from '../../repos/ledger.js';
+import { verifyCronAuth } from '../../utils/cron-auth.js';
 
 const MAX_ATTEMPTS = 5;
 // ~13s margin (32 slots) against load-balanced RPC backends disagreeing on
@@ -17,25 +17,9 @@ const MAX_ATTEMPTS = 5;
 const EXPIRY_MARGIN_SLOTS = 32;
 export const DEFAULT_SWEEP_LIMIT = 20;
 const app = new Hono();
-const digest = (s) => createHash('sha256').update(s, 'utf8').digest();
-
-/**
- * Constant-time compare against CRON_SECRET. Fails closed (returns false,
- * never throws) when either side is empty.
- * @param {string} got
- */
-function matchesCronSecret(got) {
-  const expected = process.env.CRON_SECRET;
-  if (!got || !expected) return false;
-  return timingSafeEqual(digest(got), digest(expected));
-}
 
 app.post('/', async (c) => {
-  // Vercel cron sends `Authorization: Bearer $CRON_SECRET`; an operator or
-  // manual trigger may instead send `X-Cron-Secret`. Either is accepted.
-  const bearer = (c.req.header('Authorization') || '').replace(/^Bearer\s+/i, '');
-  const cronHeader = c.req.header('X-Cron-Secret') || '';
-  if (!matchesCronSecret(bearer) && !matchesCronSecret(cronHeader)) {
+  if (!verifyCronAuth(c)) {
     return c.json({ error: 'unauthorized' }, 401);
   }
   const processed = await sweepOpenJobs(DEFAULT_SWEEP_LIMIT);

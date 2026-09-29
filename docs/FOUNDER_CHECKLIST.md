@@ -683,7 +683,11 @@ steps to actually apply and verify them against production.
    and a key still in flight returns `409` with `Retry-After: 2`.
 
 4. **Wire the >24h cleanup into C1's cron** when that task lands — this
-   task only creates the table; nothing currently prunes old rows.
+   task only creates the table; nothing currently prunes old rows. Done:
+   task C1's `cleanupIdempotencyKeys` pass (`src/repos/reconciliation.js`'s
+   `deleteExpiredIdempotencyKeys`) now runs every 5 minutes via
+   `POST /internal/reconcile-tick` — see "Task C1" below for the first-run
+   verification steps.
 
 ## Task B8 — run stranded-funds audit against mainnet
 
@@ -720,3 +724,61 @@ permanently unspendable) going forward. What's still unknown is whether any
      "recover" or re-derive these funds; the decision record
      (`docs/decisions/0001-derived-wallets.md`) exists precisely because
      this path is closed.
+
+## Task C1 — enable reconcile cron + first-run verification
+
+Task C1 adds no new migration — `POST /internal/reconcile-tick` reads
+tables created by earlier migrations (0015 ledger, 0017 unmatched
+transfers, 0018 idempotency keys) and requires no schema change. What's
+outstanding is deploying it and watching the first few live runs.
+
+1. **Set `STUCK_THRESHOLD_MINUTES`** in Vercel (production + preview) if
+   the default of 30 isn't right for launch traffic; confirm the
+   `crons` entry in `vercel.json`
+   (`POST /api/internal/reconcile-tick`, `*/5 * * * *`) is deployed. It
+   shares `CRON_SECRET` with the transfer-tick cron (task B3) via the same
+   `src/utils/cron-auth.js` guard — no new secret to provision.
+
+2. **Trigger one manual run** and confirm the per-pass summary:
+
+   ```bash
+   curl -s -X POST "$API_BASE_URL/api/internal/reconcile-tick" \
+     -H "X-Cron-Secret: $CRON_SECRET" | jq .
+   ```
+
+   Expected: a JSON body with `sweepMissedEvents`, `proveBalance`,
+   `sweepStuckRows`, `cleanupIdempotencyKeys`, each `{ ok: true, result:
+   {...} }` (a pass that threw instead reports `{ ok: false, error: "..."
+   }` without taking the other three passes down with it).
+
+3. **Confirm the balance proof passes clean on a fresh production
+   treasury** — `proveBalance.result.mismatch` should be `false`. If it's
+   `true`, this is a live `RECONCILIATION_MISMATCH` — do not silence or
+   widen the tolerance (it's intentionally 0, per the brief: gas is paid in
+   SOL, not USDC, so on-chain and ledger USDC balances must match exactly).
+   Investigate via `docs/runbooks/unmatched-transfer.md`-style manual query
+   before doing anything else with the treasury.
+
+4. **Deliberately create one stuck row** to prove pass 3 actually surfaces
+   something (devnet is fine): enqueue a `transfer_jobs` row, wait past
+   `STUCK_THRESHOLD_MINUTES` without letting the transfer-tick cron run
+   (e.g. temporarily disable that cron, or set an artificially low
+   threshold for the test), then trigger reconcile-tick manually and
+   confirm `sweepStuckRows.result` contains that row's id with
+   `table: "transfer_jobs"` and the function logs `[Reconcile] ALERT: STUCK
+   <id> ...` to the Vercel function logs.
+
+5. **Confirm the missed-event sweep is a true no-op in the common case** —
+   on a treasury with no dropped Helius deliveries, `sweepMissedEvents.
+   result.replayed` should be `[]` on every run. If it's ever non-empty in
+   steady state, that's a real finding: Helius silently dropped a webhook
+   delivery for that signature, and this pass is what caught it instead of
+   the transfer sitting unprocessed indefinitely — no further action is
+   needed (the replay path is safe by construction, CAS/unique-keyed all
+   the way down) beyond noting it happened.
+
+6. **Confirm idempotency-key housekeeping is actually pruning** — check
+   `cleanupIdempotencyKeys.result.deleted` is non-zero after the table has
+   had >24h to accumulate rows in production traffic (it will read `0` on
+   a fresh deploy with no rows old enough yet — that's expected, not a
+   failure).
