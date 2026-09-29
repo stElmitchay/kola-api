@@ -13,6 +13,7 @@ const supabase = createSupabaseClient();
  * @param {string} withdrawal.provider_code
  * @param {number} withdrawal.amount_usdc
  * @param {number} withdrawal.amount_sle
+ * @param {number} [withdrawal.amount_sle_gross]
  * @param {number} withdrawal.fee_bps
  * @param {number} withdrawal.exchange_rate
  * @param {string} withdrawal.expires_at

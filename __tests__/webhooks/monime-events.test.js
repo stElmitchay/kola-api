@@ -18,9 +18,12 @@ jest.unstable_mockModule('../../src/repos/deposits.js', () => ({
   updateDeposit: jest.fn(), createDeposit: jest.fn(),
   getDeposit: jest.fn(), listDeposits: jest.fn()
 }));
+const getWithdrawalById = jest.fn();
+const getWithdrawalByMonimePayoutId = jest.fn();
+const updateWithdrawal = jest.fn();
+
 jest.unstable_mockModule('../../src/repos/withdrawals.js', () => ({
-  getWithdrawalById: jest.fn(), getWithdrawalByMonimePayoutId: jest.fn(),
-  updateWithdrawal: jest.fn()
+  getWithdrawalById, getWithdrawalByMonimePayoutId, updateWithdrawal
 }));
 jest.unstable_mockModule('../../src/repos/transfer-jobs.js', () => ({ enqueueTransfer }));
 jest.unstable_mockModule('../../src/routes/internal/transfer-tick.js', () => ({
@@ -142,4 +145,36 @@ test('processed-after-completed does not double-fire (different event ids)', asy
   });
   expect(res2.status).toBe(200);
   expect(enqueueTransfer).toHaveBeenCalledTimes(1); // still exactly once
+});
+
+test('B4/MINOR4(b): payout.completed posts withdrawal_payout when the status write succeeds', async () => {
+  recordWebhookEvent.mockResolvedValue({ isNew: true });
+  const withdrawal = { id: 'w-1', status: 'processing', amount_sle: 12_375 };
+  getWithdrawalByMonimePayoutId.mockResolvedValue({ data: withdrawal, error: null });
+  updateWithdrawal.mockResolvedValue({ data: { ...withdrawal, status: 'completed' }, error: null });
+
+  const res = await post({
+    event: { id: 'evt-payout-1', name: 'payout.completed' },
+    data: { id: 'mp-1' }
+  });
+
+  expect(res.status).toBe(200);
+  expect(updateWithdrawal).toHaveBeenCalledWith('w-1', { status: 'completed' });
+  expect(postWithdrawalPayout).toHaveBeenCalledWith(withdrawal);
+});
+
+test('B4/MINOR4(b): payout.completed does NOT post withdrawal_payout when the status write errors', async () => {
+  recordWebhookEvent.mockResolvedValue({ isNew: true });
+  const withdrawal = { id: 'w-2', status: 'processing', amount_sle: 5_000 };
+  getWithdrawalByMonimePayoutId.mockResolvedValue({ data: withdrawal, error: null });
+  updateWithdrawal.mockResolvedValue({ data: null, error: new Error('db down') });
+
+  const res = await post({
+    event: { id: 'evt-payout-2', name: 'payout.completed' },
+    data: { id: 'mp-2' }
+  });
+
+  expect(res.status).toBe(200);
+  expect(updateWithdrawal).toHaveBeenCalledWith('w-2', { status: 'completed' });
+  expect(postWithdrawalPayout).not.toHaveBeenCalled();
 });

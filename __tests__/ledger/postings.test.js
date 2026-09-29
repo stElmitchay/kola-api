@@ -90,6 +90,28 @@ test('withdrawal receipt (gross present) posts the USDC pair plus the SLE fee-sp
   assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
 });
 
+test('withdrawal receipt (zero fee, gross == net) omits the fee_income_sle entry and the SLE side still balances', async () => {
+  // IMPORTANT 1 (B4 review): ledger_entries has CHECK (amount > 0). A
+  // zero-fee withdrawal (WITHDRAWAL_FEE_BPS=0, or gross/net rounding down
+  // into the same bucket) must NOT push a zero-amount fee_income_sle entry
+  // -- that would fail the CHECK and abort the entire post_journal call,
+  // including the otherwise-fine USDC pair.
+  await postWithdrawalReceipt({ id: 'w5', amount_usdc: 5_000_000, amount_sle: 12_500, amount_sle_gross: 12_500 });
+  expect(rpc).toHaveBeenCalledWith('post_journal', {
+    p_kind: 'withdrawal_receipt', p_resource_type: 'withdrawal', p_resource_id: 'w5',
+    p_idempotency_key: 'withdrawal_receipt:w5',
+    p_entries: [
+      { account: 'treasury_usdc', direction: 'debit', amount: '5000000' },
+      { account: 'fx_usdc', direction: 'credit', amount: '5000000' },
+      { account: 'fx_sle', direction: 'debit', amount: '12500' },
+      { account: 'user_payable_sle', direction: 'credit', amount: '12500' }
+    ]
+  });
+  const entries = rpc.mock.calls[0][1].p_entries;
+  expect(entries.some((e) => e.account === 'fee_income_sle')).toBe(false);
+  assertBalancedPerCurrency(entries);
+});
+
 test('withdrawal receipt (gross absent, pre-0015 row) posts ONLY the balanced USDC pair and logs a backfill notice', async () => {
   const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   await postWithdrawalReceipt({ id: 'w2', amount_usdc: 5_000_000, amount_sle: 12_375, amount_sle_gross: null });
