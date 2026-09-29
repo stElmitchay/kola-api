@@ -948,3 +948,5 @@ outstanding is deploying it and watching the first few live runs.
    - If not available: no action needed — `docs/fixtures/helius/AUTH.md`
      already documents why the static bearer is an acceptable posture
      (the handler never trusts the payload's money claims; see that file).
+
+## Task D1 — enable branch protection on main requiring the 'test' check

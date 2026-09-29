@@ -13,7 +13,6 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
   getAccount,
-  TOKEN_PROGRAM_ID,
   TokenAccountNotFoundError,
   TokenInvalidAccountOwnerError
 } from '@solana/spl-token';
