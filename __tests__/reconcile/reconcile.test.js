@@ -17,6 +17,7 @@ const deleteExpiredIdempotencyKeys = jest.fn();
 
 const getTreasuryUsdcBalanceMinor = jest.fn();
 const handleHeliusEvent = jest.fn();
+const loggerError = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/reconciliation.js', () => ({
   getRecentTreasurySignatures, hasProcessedSignature, getParsedTransfersForSignature,
@@ -27,6 +28,9 @@ jest.unstable_mockModule('../../src/utils/solana.js', () => ({
 }));
 jest.unstable_mockModule('../../src/routes/webhooks/helius-handler.js', () => ({
   handleHeliusEvent
+}));
+jest.unstable_mockModule('../../src/utils/logger.js', () => ({
+  logger: { error: loggerError, warn: jest.fn(), info: jest.fn(), child: () => ({ error: loggerError, warn: jest.fn(), info: jest.fn() }) }
 }));
 
 const {
@@ -88,36 +92,36 @@ describe('pass 2 — balance proof', () => {
   test('ledger treasury balance vs on-chain mismatch beyond tolerance raises an alert log', async () => {
     getTreasuryUsdcBalanceMinor.mockResolvedValue(90_000_000n);
     getLedgerTreasuryBalanceMinor.mockResolvedValue(100_000_000n); // 10 USDC hole
-    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     await runReconcile();
 
-    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('RECONCILIATION_MISMATCH'));
-    alertSpy.mockRestore();
+    expect(loggerError).toHaveBeenCalledWith(
+      { alert: true },
+      expect.stringContaining('RECONCILIATION_MISMATCH')
+    );
   });
 
   test('a matching balance raises no alert', async () => {
     getTreasuryUsdcBalanceMinor.mockResolvedValue(42_000_000n);
     getLedgerTreasuryBalanceMinor.mockResolvedValue(42_000_000n);
-    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const result = await proveBalance();
 
     expect(result.mismatch).toBe(false);
-    expect(alertSpy.mock.calls.some((c) => String(c[0]).includes('RECONCILIATION_MISMATCH'))).toBe(false);
-    alertSpy.mockRestore();
+    expect(loggerError.mock.calls.some((c) => String(c[1]).includes('RECONCILIATION_MISMATCH'))).toBe(false);
   });
 });
 
 describe('pass 3 — stuck-state sweep', () => {
   test('stale in-flight rows are surfaced (processing > 30 min)', async () => {
     listStaleInflight.mockResolvedValue([{ table: 'withdrawals', id: 'w-9', status: 'processing', age_minutes: 45 }]);
-    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     await runReconcile();
 
-    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('STUCK w-9'));
-    alertSpy.mockRestore();
+    expect(loggerError).toHaveBeenCalledWith(
+      { alert: true },
+      expect.stringContaining('STUCK w-9')
+    );
   });
 
   test('defaults the threshold to 30 minutes when STUCK_THRESHOLD_MINUTES is unset', async () => {
@@ -152,7 +156,6 @@ describe('pass 4 — housekeeping', () => {
 describe('pass isolation', () => {
   test('the first pass throwing does not stop the remaining three from running', async () => {
     getRecentTreasurySignatures.mockRejectedValue(new Error('RPC unreachable'));
-    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const results = await runReconcile();
 
@@ -164,8 +167,10 @@ describe('pass isolation', () => {
     expect(results.proveBalance.ok).toBe(true);
     expect(results.sweepStuckRows.ok).toBe(true);
     expect(results.cleanupIdempotencyKeys.ok).toBe(true);
-    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('pass sweepMissedEvents threw'));
-    alertSpy.mockRestore();
+    expect(loggerError).toHaveBeenCalledWith(
+      { alert: true },
+      expect.stringContaining('pass sweepMissedEvents threw')
+    );
   });
 });
 

@@ -11,22 +11,12 @@ import {
   updateDeposit
 } from '../../repos/deposits.js';
 import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
+import { envInt } from '../../utils/config.js';
 import {
   createValidationError,
   createNotFoundError,
   createDatabaseError
 } from '../../utils/errors.js';
-
-/**
- * @param {string} name
- * @param {number} fallback
- */
-function envInt(name, fallback) {
-  const v = process.env[name];
-  if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
 
 /**
  * Calculate USDC amount from SLE amount and exchange rate
@@ -76,8 +66,8 @@ export async function initiateDeposit(params) {
   }
   assertRateFresh(rateData);
 
-  const maxSle = envInt('DEPOSIT_MAX_SLE', 500_000);        // 5,000.00 SLE default
-  const minSle = envInt('DEPOSIT_MIN_SLE', 100);            // 1.00 SLE default
+  const maxSle = envInt('DEPOSIT_MAX_SLE');        // 5,000.00 SLE default
+  const minSle = envInt('DEPOSIT_MIN_SLE');        // 1.00 SLE default
   if (params.amount > maxSle) {
     throw createValidationError(`Amount exceeds maximum (${maxSle} minor units)`);
   }

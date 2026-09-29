@@ -9,6 +9,8 @@ import {
 } from '../../utils/solana.js';
 import { postDepositPayout } from '../../repos/ledger.js';
 import { verifyCronAuth } from '../../utils/cron-auth.js';
+import { errorEnvelope } from '../../utils/errors.js';
+import { logger } from '../../utils/logger.js';
 
 const MAX_ATTEMPTS = 5;
 // ~13s margin (32 slots) against load-balanced RPC backends disagreeing on
@@ -20,7 +22,7 @@ const app = new Hono();
 
 app.post('/', async (c) => {
   if (!verifyCronAuth(c)) {
-    return c.json({ error: 'unauthorized' }, 401);
+    return c.json(errorEnvelope('Unauthorized', 'unauthorized', c.get('requestId')), 401);
   }
   const processed = await sweepOpenJobs(DEFAULT_SWEEP_LIMIT);
   return c.json({ processed });
@@ -48,7 +50,7 @@ export async function sweepOpenJobs(limit) {
     try {
       await processJob(job);
     } catch (e) {
-      console.error(`[TransferTick] job ${job.id} threw outside its own recovery path, isolating: ${e.message}`);
+      logger.error(`[TransferTick] job ${job.id} threw outside its own recovery path, isolating: ${e.message}`);
       await bumpAttempt(job.id, e.message);
     }
   }
@@ -84,7 +86,7 @@ export async function processJob(job) {
       job.deposit_id, 'processing', failureUpdate
     );
     if (processingErr) {
-      console.error(`[TransferTick] deposit ${job.deposit_id} processing->failed CAS error: ${processingErr.message}`);
+      logger.error(`[TransferTick] deposit ${job.deposit_id} processing->failed CAS error: ${processingErr.message}`);
     }
     if (!fromProcessing && !processingErr) {
       // The deposit hadn't reached 'processing' yet (still 'confirmed') —
@@ -93,10 +95,13 @@ export async function processJob(job) {
         job.deposit_id, 'confirmed', failureUpdate
       );
       if (confirmedErr) {
-        console.error(`[TransferTick] deposit ${job.deposit_id} confirmed->failed CAS error: ${confirmedErr.message}`);
+        logger.error(`[TransferTick] deposit ${job.deposit_id} confirmed->failed CAS error: ${confirmedErr.message}`);
       }
       if (!fromConfirmed && !confirmedErr) {
-        console.error(
+        // Attempts exhausted (MAX_ATTEMPTS) AND neither CAS transition
+        // matched — the deposit needs a human. Page-worthy (F12).
+        logger.error(
+          { alert: true },
           `[TransferTick] ALERT: deposit ${job.deposit_id} (job ${job.id}) transfer failed permanently but ` +
           `neither processing->failed nor confirmed->failed matched — deposit status needs manual operator investigation`
         );
@@ -122,7 +127,7 @@ export async function processJob(job) {
       job.deposit_id, 'confirmed', { status: 'processing' }
     );
     if (confirmErr) {
-      console.error(`[TransferTick] deposit ${job.deposit_id} confirmed->processing CAS error: ${confirmErr.message}`);
+      logger.error(`[TransferTick] deposit ${job.deposit_id} confirmed->processing CAS error: ${confirmErr.message}`);
     }
     // Not fenced on the result above: on the re-sign path the deposit is
     // already 'processing' from the first attempt, so this legitimately
@@ -151,16 +156,16 @@ export async function processJob(job) {
 async function finish(job, signature) {
   const { data: sentData, error: sentErr } = await markSent(job.id, signature);
   if (sentErr) {
-    console.error(`[TransferTick] job ${job.id} markSent error: ${sentErr.message}`);
+    logger.error(`[TransferTick] job ${job.id} markSent error: ${sentErr.message}`);
   } else if (!sentData) {
-    console.error(`[TransferTick] job ${job.id} markSent no-op — status was not 'sending' when finish() ran`);
+    logger.error(`[TransferTick] job ${job.id} markSent no-op — status was not 'sending' when finish() ran`);
   }
 
   const { error: completedErr } = await updateDepositIfStatus(job.deposit_id, 'processing', {
     status: 'completed', solana_tx_signature: signature
   });
   if (completedErr) {
-    console.error(`[TransferTick] deposit ${job.deposit_id} processing->completed CAS error: ${completedErr.message}`);
+    logger.error(`[TransferTick] deposit ${job.deposit_id} processing->completed CAS error: ${completedErr.message}`);
   }
   await postDepositPayout({ id: job.deposit_id, amount_usdc: job.amount_usdc });
 }

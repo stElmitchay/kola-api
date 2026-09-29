@@ -1,6 +1,7 @@
 //@ts-check
 
 import { createHash, timingSafeEqual } from 'crypto';
+import { errorEnvelope } from '../utils/errors.js';
 
 /**
  * Admin authentication middleware. Checks X-Admin-Key against named keys
@@ -45,7 +46,7 @@ export async function adminAuth(c, next) {
   const legacySecret = process.env.ADMIN_SECRET_KEY;
 
   if (!adminKey || (candidates.length === 0 && !legacySecret)) {
-    return c.json({ error: 'Missing admin key' }, 401);
+    return c.json(errorEnvelope('Unauthorized', 'Missing admin key', c.get('requestId')), 401);
   }
 
   const provided = digest(adminKey);
@@ -64,5 +65,5 @@ export async function adminAuth(c, next) {
     return;
   }
 
-  return c.json({ error: 'Invalid admin key' }, 401);
+  return c.json(errorEnvelope('Unauthorized', 'Invalid admin key', c.get('requestId')), 401);
 }

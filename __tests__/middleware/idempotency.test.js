@@ -153,7 +153,13 @@ test('(c) same key, different body → 422', async () => {
 
   expect(handler).not.toHaveBeenCalled();
   expect(res.status).toBe(422);
-  expect(await res.json()).toEqual({ error: 'Idempotency-Key reused with a different request body' });
+  expect(await res.json()).toEqual({
+    error: {
+      code: 'ValidationError',
+      message: 'Idempotency-Key reused with a different request body',
+      request_id: null
+    }
+  });
 });
 
 test('(d) in-flight key (response_body still null) → 409 with Retry-After', async () => {
@@ -181,7 +187,9 @@ test('(d) in-flight key (response_body still null) → 409 with Retry-After', as
   expect(handler).not.toHaveBeenCalled();
   expect(res.status).toBe(409);
   expect(res.headers.get('Retry-After')).toBe('2');
-  expect(await res.json()).toEqual({ error: 'Original request still in flight' });
+  expect(await res.json()).toEqual({
+    error: { code: 'Conflict', message: 'Original request still in flight', request_id: null }
+  });
 });
 
 test('(e) missing Idempotency-Key header → pass-through, no storage calls', async () => {

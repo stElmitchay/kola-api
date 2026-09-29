@@ -10,6 +10,8 @@ import { listDeposits } from '../../repos/deposits.js';
 import { listUnmatched } from '../../repos/unmatched-transfers.js';
 import { getActiveRate } from '../../repos/exchange-rates.js';
 import { writeAudit } from '../../repos/audit-log.js';
+import { errorEnvelope } from '../../utils/errors.js';
+import { logger } from '../../utils/logger.js';
 
 const app = new Hono();
 
@@ -92,7 +94,7 @@ app.put('/exchange-rates', async (c) => {
 
   const applicationId = c.req.header('X-Application-Id');
   if (!applicationId) {
-    return c.json({ error: 'X-Application-Id header is required' }, 400);
+    return c.json(errorEnvelope('ValidationError', 'X-Application-Id header is required', c.get('requestId')), 400);
   }
 
   const actor = c.get('adminActor');
@@ -118,7 +120,7 @@ app.put('/exchange-rates', async (c) => {
 app.get('/exchange-rates', async (c) => {
   const applicationId = c.req.header('X-Application-Id');
   if (!applicationId) {
-    return c.json({ error: 'X-Application-Id header is required' }, 400);
+    return c.json(errorEnvelope('ValidationError', 'X-Application-Id header is required', c.get('requestId')), 400);
   }
 
   const rates = await getExchangeRates(applicationId);
@@ -130,7 +132,7 @@ app.get('/exchange-rates', async (c) => {
 app.get('/deposits', async (c) => {
   const applicationId = c.req.header('X-Application-Id');
   if (!applicationId) {
-    return c.json({ error: 'X-Application-Id header is required' }, 400);
+    return c.json(errorEnvelope('ValidationError', 'X-Application-Id header is required', c.get('requestId')), 400);
   }
 
   const filters = {};
@@ -145,7 +147,8 @@ app.get('/deposits', async (c) => {
   const { data, error } = await listDeposits(applicationId, filters);
 
   if (error) {
-    return c.json({ error: error.message }, 500);
+    (c.get('log') || logger).error({ err: error }, `[Admin] listDeposits failed: ${error.message}`);
+    return c.json(errorEnvelope('DatabaseError', 'Internal error', c.get('requestId')), 500);
   }
 
   return c.json(data);
@@ -164,7 +167,8 @@ app.get('/unmatched-transfers', async (c) => {
   const { data, error } = await listUnmatched(filters);
 
   if (error) {
-    return c.json({ error: error.message }, 500);
+    (c.get('log') || logger).error({ err: error }, `[Admin] listUnmatched failed: ${error.message}`);
+    return c.json(errorEnvelope('DatabaseError', 'Internal error', c.get('requestId')), 500);
   }
 
   return c.json(data);

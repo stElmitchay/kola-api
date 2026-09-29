@@ -1,6 +1,7 @@
 //@ts-check
 
 import { createSupabaseClient } from '../utils/supabase.js';
+import { logger } from '../utils/logger.js';
 
 const supabase = createSupabaseClient();
 
@@ -8,7 +9,7 @@ const supabase = createSupabaseClient();
  * Insert an append-only audit row for an admin/operator action (F12).
  *
  * Never throws. A write failure (RPC error or rejection) is
- * console.error'd at alert level and swallowed — the admin action this
+ * logged at alert level (logger.error({alert:true}, ...)) and swallowed — the admin action this
  * describes has already happened and must never be rolled back or blocked
  * by an audit write failing.
  *
@@ -33,9 +34,9 @@ export async function writeAudit({ actor, action, resourceType, resourceId, befo
       ip: ip ?? null
     });
     if (error) {
-      console.error(`[Audit] ALERT: writeAudit failed action=${action} resource=${resourceType}:${resourceId}: ${error.message}`);
+      logger.error({ alert: true }, `[Audit] ALERT: writeAudit failed action=${action} resource=${resourceType}:${resourceId}: ${error.message}`);
     }
   } catch (e) {
-    console.error(`[Audit] ALERT: writeAudit threw action=${action} resource=${resourceType}:${resourceId}: ${e.message}`);
+    logger.error({ alert: true }, `[Audit] ALERT: writeAudit threw action=${action} resource=${resourceType}:${resourceId}: ${e.message}`);
   }
 }

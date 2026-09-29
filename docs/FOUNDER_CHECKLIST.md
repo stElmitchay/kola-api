@@ -10,8 +10,10 @@
   kola-app before this deploys to production, since a client still omitting
   `walletAddress` will now get a `400` instead of a derived wallet.
 - **`POST /v1/wallets/derive` now returns `410 Gone`** with
-  `{ "error": "Derived wallets are discontinued. Supply walletAddress on deposit." }`.
-  Any client still calling this endpoint must be updated to stop calling it.
+  `{ "error": { "code": "Gone", "message": "Derived wallets are discontinued. Supply walletAddress on deposit.", "request_id": "..." } }`
+  (task C4 moved every error response — this one included — onto the
+  unified `{ error: { code, message, request_id } }` envelope). Any client
+  still calling this endpoint must be updated to stop calling it.
   `GET /v1/wallets/:address/balance` is unaffected and still works.
 
 # Founder checklist — live infrastructure steps
@@ -859,3 +861,55 @@ outstanding is deploying it and watching the first few live runs.
    with `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`
    and `Retry-After` headers, then confirm the count resets after the
    sliding window rolls over.
+
+## Task C4 — structured logging, config validation, Sentry, error envelope
+
+1. **`api/index.js` now validates every required env var at startup**
+   (`validateConfig()` in `src/utils/config.js`, called before any route
+   module loads). A deploy missing any of `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY`, `MONIME_ACCESS_TOKEN`, `MONIME_SPACE_ID`,
+   `MONIME_WEBHOOK_SECRET`, `MONIME_FINANCIAL_ACCOUNT_ID`, `HELIUS_URL`,
+   `TREASURY_SECRET_KEY`, `USDC_MINT`, `HELIUS_WEBHOOK_AUTH_HEADER`,
+   `API_KEY_SALT`, or `CRON_SECRET` now fails to boot with one error
+   listing every missing var, instead of surfacing later as an opaque
+   failure the first time a request touches the missing var. Nothing to
+   provision here if Vercel env is already complete — this only changes
+   *when* a misconfiguration is caught (deploy time, not first request).
+
+2. **(Optional) Provision Sentry**: set `SENTRY_DSN` in Vercel
+   (production + preview) to start receiving 5xx errors
+   (`DatabaseError`/`MonimeError`/`OnChainError`/unknown) in Sentry —
+   `src/utils/sentry.js` is a no-op without it, so this is safe to skip
+   initially. See `.env.example`.
+
+3. **Every error response now uses one envelope**:
+   `{ "error": { "code": "...", "message": "...", "request_id": "..." } }`.
+   This replaces the previous mix of `{ "success": false, "message": "..." }`
+   (global error handler) and ad-hoc `{ "error": "some string" }` shapes
+   (auth 401s, kill-switch 503, idempotency 409/422, rate-limit 429, and
+   several route-level 400/404/410/500s). Any client parsing error bodies
+   by string-matching `error` as a plain string must be updated to read
+   `error.message` (and can key retry/UI logic off `error.code`, which is
+   stable — e.g. `'ValidationError'`, `'Unauthorized'`, `'RateLimited'`,
+   `'ServiceUnavailable'`, `'InternalError'`). Webhook acks
+   (`{ "received": true, ... }`) are unaffected — they were never errors.
+
+4. **Structured logging (pino) with PII redaction** is now the only
+   logging path in `src/` and `api/` — every `console.log`/`console.error`/
+   `console.warn` call site was swept onto `logger` (`src/utils/logger.js`).
+   `phone_number`/`phoneNumber`/`wallet_address`/`walletAddress`/
+   `destination`/`from_wallet` are redacted to `"[redacted]"` wherever they
+   appear as a structured field. Page-worthy lines (reconciliation
+   mismatches, stuck rows, unmatched transfers, amount mismatches, ledger/
+   audit posting failures, permanent transfer-job failures) are logged as
+   `logger.error({ alert: true, ... }, 'MESSAGE')` — wire a Better
+   Stack/Sentry/PagerDuty alert rule on `alert:true` in whatever log sink
+   Vercel logs are shipped to.
+
+5. **Every request now carries a `request_id`** (`src/middleware/
+   request-context.js`, mounted first, before the kill switch), and one
+   access-log line (`route`, `method`, `status`, `latency_ms`,
+   `request_id`) is emitted per request on completion. The same
+   `request_id` is echoed in every error envelope above — useful for
+   correlating a client-reported error with the corresponding server log
+   line.

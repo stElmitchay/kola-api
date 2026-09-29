@@ -13,24 +13,14 @@ import {
 } from '../../repos/withdrawals.js';
 import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
 import { postWithdrawalReceipt } from '../../repos/ledger.js';
+import { envInt } from '../../utils/config.js';
 import {
   createValidationError,
   createNotFoundError,
   createDatabaseError
 } from '../../utils/errors.js';
 
-const DEFAULT_FEE_BPS = 100;            // 1%
-const DEFAULT_MIN_USDC = 100_000;       // 0.1 USDC
-const DEFAULT_MAX_USDC = 100_000_000;   // 100 USDC
-const DEFAULT_DAILY_CAP_USDC = 500_000_000; // 500 USDC
 const WITHDRAWAL_EXPIRY_MINUTES = 30;
-
-function envInt(name, fallback) {
-  const v = process.env[name];
-  if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
 
 /**
  * Calculate the gross (pre-fee) and net (post-fee) SLE for a withdrawal.
@@ -76,9 +66,9 @@ export async function initiateWithdrawal(params) {
   }
 
   // Limit checks
-  const minUsdc = envInt('WITHDRAWAL_MIN_USDC', DEFAULT_MIN_USDC);
-  const maxUsdc = envInt('WITHDRAWAL_MAX_USDC', DEFAULT_MAX_USDC);
-  const dailyCap = envInt('WITHDRAWAL_DAILY_CAP_USDC', DEFAULT_DAILY_CAP_USDC);
+  const minUsdc = envInt('WITHDRAWAL_MIN_USDC');
+  const maxUsdc = envInt('WITHDRAWAL_MAX_USDC');
+  const dailyCap = envInt('WITHDRAWAL_DAILY_CAP_USDC');
 
   if (params.amountUsdc < minUsdc) {
     throw createValidationError(`Amount below minimum (${minUsdc} minor units / ${(minUsdc / 1_000_000).toFixed(2)} USDC)`);
@@ -94,7 +84,7 @@ export async function initiateWithdrawal(params) {
   }
   assertRateFresh(rateData);
   const rate = new BigNumber(rateData.rate);
-  const feeBps = envInt('WITHDRAWAL_FEE_BPS', DEFAULT_FEE_BPS);
+  const feeBps = envInt('WITHDRAWAL_FEE_BPS');
   const { net: amountSle, gross: amountSleGross } = calculateSleAmount(params.amountUsdc, rate, feeBps);
 
   if (amountSle <= 0) {

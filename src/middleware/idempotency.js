@@ -2,6 +2,8 @@
 
 import { createHash } from 'crypto';
 import { createSupabaseClient } from '../utils/supabase.js';
+import { errorEnvelope } from '../utils/errors.js';
+import { logger } from '../utils/logger.js';
 
 const supabase = createSupabaseClient();
 
@@ -30,13 +32,17 @@ export function idempotency(scope) {
     if (claimErr) { // row already exists — this request lost the claim
       const { data: row } = await supabase.from('idempotency_keys').select('*')
         .eq('application', application).eq('scope', scope).eq('key', key).single();
-      if (!row) return c.json({ error: 'Idempotency conflict' }, 409);
+      const requestId = c.get('requestId');
+      if (!row) return c.json(errorEnvelope('Conflict', 'Idempotency conflict', requestId), 409);
       if (row.request_hash !== requestHash) {
-        return c.json({ error: 'Idempotency-Key reused with a different request body' }, 422);
+        return c.json(
+          errorEnvelope('ValidationError', 'Idempotency-Key reused with a different request body', requestId),
+          422
+        );
       }
       if (row.response_body === null) {
         c.header('Retry-After', '2');
-        return c.json({ error: 'Original request still in flight' }, 409);
+        return c.json(errorEnvelope('Conflict', 'Original request still in flight', requestId), 409);
       }
       return c.json(row.response_body, row.response_status);
     }
@@ -50,7 +56,8 @@ export function idempotency(scope) {
       .eq('application', application).eq('scope', scope).eq('key', key);
     if (storeErr) {
       // Storage failure must never break the response already sent to the client.
-      console.error(`[Idempotency] Failed to store response for ${scope}/${key}: ${storeErr.message}`);
+      const log = c.get('log') || logger;
+      log.error({ alert: true }, `[Idempotency] Failed to store response for ${scope}/${key}: ${storeErr.message}`);
     }
   };
 }

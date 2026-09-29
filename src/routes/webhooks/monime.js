@@ -13,16 +13,19 @@ import { recordWebhookEvent } from '../../repos/webhook-events.js';
 import { enqueueTransfer } from '../../repos/transfer-jobs.js';
 import { sweepOpenJobs, DEFAULT_SWEEP_LIMIT } from '../internal/transfer-tick.js';
 import { postDepositCollection, postWithdrawalPayout } from '../../repos/ledger.js';
+import { errorEnvelope } from '../../utils/errors.js';
+import { logger } from '../../utils/logger.js';
 
 const app = new Hono();
 
 app.post('/', async (c) => {
   const rawBody = await c.req.text();
   const signature = c.req.header('Monime-Signature');
+  const log = c.get('log') || logger;
 
   if (!signature || !verifyWebhookSignature(rawBody, signature)) {
-    console.error('[Webhook] Invalid signature');
-    return c.json({ error: 'Invalid signature' }, 401);
+    log.error('[Webhook] Invalid signature');
+    return c.json(errorEnvelope('Unauthorized', 'Invalid signature', c.get('requestId')), 401);
   }
 
   const payload = JSON.parse(rawBody);
@@ -32,22 +35,22 @@ app.post('/', async (c) => {
 
   const { isNew, error: gateError } = await recordWebhookEvent('monime', eventId, eventName, payload, rawBody);
   if (gateError) {
-    console.error(`[Webhook] Event gate error for ${eventName}: ${gateError.message}`);
+    log.error({ alert: true }, `[Webhook] Event gate error for ${eventName}: ${gateError.message}`);
     c.header('Retry-After', '60');
-    return c.json({ error: 'Event gate unavailable' }, 503);
+    return c.json(errorEnvelope('ServiceUnavailable', 'Event gate unavailable', c.get('requestId')), 503);
   }
   if (!isNew) {
     return c.json({ received: true, duplicate: true });
   }
 
-  console.log(`[Webhook] Received event: ${eventName}`);
+  log.info(`[Webhook] Received event: ${eventName}`);
 
   // Route by event resource type. Each handler is responsible for extracting
   // the identifier it needs (reference for deposits, payout id for payouts).
   if (eventName.startsWith('payment_code.') || eventName.startsWith('checkout_session.')) {
     const reference = payload.data?.reference;
     if (!reference) {
-      console.error('[Webhook] No reference in deposit payload');
+      log.error('[Webhook] No reference in deposit payload');
       return c.json({ received: true });
     }
     return handleDepositEvent(c, eventName, reference, payload);
@@ -57,7 +60,7 @@ app.post('/', async (c) => {
     return handlePayoutEvent(c, eventName, payload.data);
   }
 
-  console.log(`[Webhook] Ignoring unhandled event type: ${eventName}`);
+  log.info(`[Webhook] Ignoring unhandled event type: ${eventName}`);
   return c.json({ received: true });
 });
 
@@ -68,15 +71,16 @@ app.post('/', async (c) => {
  * @param {any} payload
  */
 async function handleDepositEvent(c, eventName, reference, payload) {
+  const log = c.get('log') || logger;
   const { data: deposit, error } = await getDepositById(reference);
 
   if (error || !deposit) {
-    console.error(`[Webhook] Deposit not found for reference: ${reference}`);
+    log.error(`[Webhook] Deposit not found for reference: ${reference}`);
     return c.json({ received: true });
   }
 
   if (['completed', 'failed', 'expired'].includes(deposit.status)) {
-    console.log(`[Webhook] Deposit ${deposit.id} already ${deposit.status}, skipping`);
+    log.info(`[Webhook] Deposit ${deposit.id} already ${deposit.status}, skipping`);
     return c.json({ received: true });
   }
 
@@ -106,13 +110,13 @@ async function handleDepositEvent(c, eventName, reference, payload) {
         status: 'amount_mismatch',
         failure_reason: `collected=${paid ?? 'absent'} quoted=${deposit.amount_sle}`
       });
-      console.error(`[Webhook] AMOUNT MISMATCH deposit=${deposit.id}`); // C4 upgrades this to a paged alert
+      log.error({ alert: true }, `[Webhook] AMOUNT MISMATCH deposit=${deposit.id}`);
       return c.json({ received: true });
     }
     await handleDepositSuccess(deposit);
   } else if (expiryEvents.includes(eventName)) {
     await updateDepositIfStatus(deposit.id, 'pending', { status: 'expired' });
-    console.log(`[Webhook] Deposit ${deposit.id} marked as expired`);
+    log.info(`[Webhook] Deposit ${deposit.id} marked as expired`);
   }
 
   return c.json({ received: true });
@@ -124,6 +128,7 @@ async function handleDepositEvent(c, eventName, reference, payload) {
  * @param {any} data
  */
 async function handlePayoutEvent(c, eventName, data) {
+  const log = c.get('log') || logger;
   // Payout webhooks identify the payout via `data.id` (Monime's payout id we
   // stored when triggering it). Fall back to metadata.withdrawal_id.
   const payoutId = data?.id;
@@ -139,21 +144,21 @@ async function handlePayoutEvent(c, eventName, data) {
 
   const withdrawal = result?.data;
   if (!withdrawal) {
-    console.error(`[Webhook] Withdrawal not found for payout id=${payoutId} / metadata=${metadataWithdrawalId}`);
+    log.error(`[Webhook] Withdrawal not found for payout id=${payoutId} / metadata=${metadataWithdrawalId}`);
     return c.json({ received: true });
   }
 
   if (['completed', 'failed', 'expired'].includes(withdrawal.status)) {
-    console.log(`[Webhook] Withdrawal ${withdrawal.id} already ${withdrawal.status}, skipping`);
+    log.info(`[Webhook] Withdrawal ${withdrawal.id} already ${withdrawal.status}, skipping`);
     return c.json({ received: true });
   }
 
   if (eventName === 'payout.completed') {
     const { error: writeErr } = await updateWithdrawal(withdrawal.id, { status: 'completed' });
     if (writeErr) {
-      console.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as completed: ${writeErr.message}`);
+      log.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as completed: ${writeErr.message}`);
     } else {
-      console.log(`[Webhook] Withdrawal ${withdrawal.id} completed`);
+      log.info(`[Webhook] Withdrawal ${withdrawal.id} completed`);
       await postWithdrawalPayout(withdrawal);
     }
   } else if (eventName === 'payout.failed') {
@@ -163,9 +168,9 @@ async function handlePayoutEvent(c, eventName, data) {
       failure_reason: reason
     });
     if (writeErr) {
-      console.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as failed: ${writeErr.message}`);
+      log.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as failed: ${writeErr.message}`);
     } else {
-      console.log(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
+      log.info(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
     }
   }
 
@@ -188,11 +193,11 @@ export async function handleDepositSuccess(deposit) {
     deposit.id, 'pending', { status: 'confirmed' }
   );
   if (claimErr) {
-    console.error(`[Webhook] Deposit ${deposit.id} claim failed: ${claimErr.message}`);
+    logger.error(`[Webhook] Deposit ${deposit.id} claim failed: ${claimErr.message}`);
     return;
   }
   if (!claimed) {
-    console.log(`[Webhook] Deposit ${deposit.id} already claimed, skipping`);
+    logger.info(`[Webhook] Deposit ${deposit.id} already claimed, skipping`);
     return;
   }
 
@@ -204,7 +209,7 @@ export async function handleDepositSuccess(deposit) {
     amountUsdc: claimed.amount_usdc
   });
   if (enqueueErr) {
-    console.error(`[Webhook] enqueueTransfer failed for deposit ${deposit.id}: ${enqueueErr.message}`);
+    logger.error(`[Webhook] enqueueTransfer failed for deposit ${deposit.id}: ${enqueueErr.message}`);
   }
 
   // Best-effort immediate kick so the payout doesn't sit idle until the next
@@ -215,11 +220,11 @@ export async function handleDepositSuccess(deposit) {
   try {
     waitUntil(
       sweepOpenJobs(DEFAULT_SWEEP_LIMIT).catch((error) => {
-        console.error(`[Webhook] waitUntil kick's sweepOpenJobs failed for deposit ${deposit.id}: ${error.message}`);
+        logger.error(`[Webhook] waitUntil kick's sweepOpenJobs failed for deposit ${deposit.id}: ${error.message}`);
       })
     );
   } catch (error) {
-    console.error(`[Webhook] waitUntil kick failed for deposit ${deposit.id}: ${error.message}`);
+    logger.error(`[Webhook] waitUntil kick failed for deposit ${deposit.id}: ${error.message}`);
   }
 }
 

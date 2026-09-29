@@ -1,6 +1,7 @@
 //@ts-check
 
 import { timingSafeEqual } from 'crypto';
+import { logger } from './logger.js';
 
 /**
  * Verify the Helius webhook auth header. Helius lets you configure a static
@@ -14,7 +15,7 @@ import { timingSafeEqual } from 'crypto';
 export function verifyHeliusAuth(headerValue) {
   const expected = process.env.HELIUS_WEBHOOK_AUTH_HEADER;
   if (!expected) {
-    console.error('[Helius] HELIUS_WEBHOOK_AUTH_HEADER not configured');
+    logger.error('[Helius] HELIUS_WEBHOOK_AUTH_HEADER not configured');
     return false;
   }
   if (!headerValue) return false;

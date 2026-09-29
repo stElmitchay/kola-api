@@ -1,6 +1,7 @@
 //@ts-check
 
 import { createSupabaseClient } from '../utils/supabase.js';
+import { logger } from '../utils/logger.js';
 
 const supabase = createSupabaseClient();
 
@@ -12,7 +13,7 @@ const supabase = createSupabaseClient();
  * must never round-trip through `Number()` on the way to a bigint column.
  *
  * Never throws. A posting failure (RPC error or rejection) is
- * console.error'd at alert level and swallowed — the money movement this
+ * logged at alert level (logger.error({alert:true}, ...)) and swallowed — the money movement this
  * journal describes has already happened and must never be rolled back or
  * blocked by a ledger write failing. The idempotency key makes a later
  * backfill safe once C1's reconciliation job (or an operator) notices the
@@ -39,10 +40,10 @@ export async function postJournal(kind, { resourceType, resourceId, idempotencyK
       }))
     });
     if (error) {
-      console.error(`[Ledger] ALERT: post_journal failed kind=${kind} resource=${resourceType}:${resourceId}: ${error.message}`);
+      logger.error({ alert: true }, `[Ledger] ALERT: post_journal failed kind=${kind} resource=${resourceType}:${resourceId}: ${error.message}`);
     }
   } catch (e) {
-    console.error(`[Ledger] ALERT: post_journal threw kind=${kind} resource=${resourceType}:${resourceId}: ${e.message}`);
+    logger.error({ alert: true }, `[Ledger] ALERT: post_journal threw kind=${kind} resource=${resourceType}:${resourceId}: ${e.message}`);
   }
 }
 
@@ -73,7 +74,7 @@ export async function postDepositCollection(deposit) {
       entries
     });
   } catch (e) {
-    console.error(`[Ledger] ALERT: postDepositCollection threw before posting for deposit ${deposit?.id}: ${e.message}`);
+    logger.error({ alert: true }, `[Ledger] ALERT: postDepositCollection threw before posting for deposit ${deposit?.id}: ${e.message}`);
   }
 }
 
@@ -94,7 +95,7 @@ export async function postDepositPayout(deposit) {
       entries
     });
   } catch (e) {
-    console.error(`[Ledger] ALERT: postDepositPayout threw before posting for deposit ${deposit?.id}: ${e.message}`);
+    logger.error({ alert: true }, `[Ledger] ALERT: postDepositPayout threw before posting for deposit ${deposit?.id}: ${e.message}`);
   }
 }
 
@@ -124,7 +125,8 @@ export async function postWithdrawalReceipt(withdrawal) {
     ];
 
     if (withdrawal.amount_sle_gross === null || withdrawal.amount_sle_gross === undefined) {
-      console.error(
+      logger.error(
+        { alert: true },
         `[Ledger] ALERT: withdrawal ${withdrawal.id} has no amount_sle_gross (pre-0015 row) — ` +
         'posted USDC leg only; SLE fee-split entries need manual backfill'
       );
@@ -147,7 +149,7 @@ export async function postWithdrawalReceipt(withdrawal) {
       entries
     });
   } catch (e) {
-    console.error(`[Ledger] ALERT: postWithdrawalReceipt threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
+    logger.error({ alert: true }, `[Ledger] ALERT: postWithdrawalReceipt threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
   }
 }
 
@@ -169,6 +171,6 @@ export async function postWithdrawalPayout(withdrawal) {
       entries
     });
   } catch (e) {
-    console.error(`[Ledger] ALERT: postWithdrawalPayout threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
+    logger.error({ alert: true }, `[Ledger] ALERT: postWithdrawalPayout threw before posting for withdrawal ${withdrawal?.id}: ${e.message}`);
   }
 }
