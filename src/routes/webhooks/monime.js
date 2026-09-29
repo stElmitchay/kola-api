@@ -116,15 +116,23 @@ async function handlePayoutEvent(c, eventName, data) {
   }
 
   if (eventName === 'payout.completed') {
-    await updateWithdrawal(withdrawal.id, { status: 'completed' });
-    console.log(`[Webhook] Withdrawal ${withdrawal.id} completed`);
+    const { error: writeErr } = await updateWithdrawal(withdrawal.id, { status: 'completed' });
+    if (writeErr) {
+      console.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as completed: ${writeErr.message}`);
+    } else {
+      console.log(`[Webhook] Withdrawal ${withdrawal.id} completed`);
+    }
   } else if (eventName === 'payout.failed') {
     const reason = data?.failureDetail?.message || data?.failureDetail?.code || 'Monime payout failed';
-    await updateWithdrawal(withdrawal.id, {
+    const { error: writeErr } = await updateWithdrawal(withdrawal.id, {
       status: 'failed',
       failure_reason: reason
     });
-    console.log(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
+    if (writeErr) {
+      console.error(`[Webhook] Failed to mark withdrawal ${withdrawal.id} as failed: ${writeErr.message}`);
+    } else {
+      console.log(`[Webhook] Withdrawal ${withdrawal.id} failed: ${reason}`);
+    }
   }
 
   return c.json({ received: true });
