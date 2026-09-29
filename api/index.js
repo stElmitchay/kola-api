@@ -119,4 +119,13 @@ app.notFound((c) => {
   return c.json(errorEnvelope('NotFoundError', 'Not found', requestId), 404);
 });
 
+// The raw Hono instance, exported for the integration suite
+// (`__tests__/integration/*`), which drives the SAME mounted routers,
+// middleware stack, CORS config and error handlers through
+// `app.request()` instead of an HTTP socket. Exporting the instance rather
+// than rebuilding an equivalent app in the harness is the point: a route
+// that is mounted here but forgotten in a test-only app would otherwise go
+// untested. Nothing in production reads this export.
+export { app };
+
 export default handle(app);

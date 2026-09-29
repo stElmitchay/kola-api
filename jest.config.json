@@ -1,4 +1,5 @@
 {
-  "testMatch": ["**/__tests__/**/*.js"],
+  "testMatch": ["**/__tests__/**/*.test.js"],
+  "testPathIgnorePatterns": ["/node_modules/", "<rootDir>/__tests__/integration/"],
   "transform": {}
 }
