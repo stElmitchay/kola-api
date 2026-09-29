@@ -102,15 +102,22 @@ non-obvious:
    report does not list: that would be one of the out-of-band changes, and
    it belongs in a new migration numbered `>= 0009`.
 
-2. **File order is not numeric order.** The CLI orders migrations
-   lexicographically by their numeric prefix, and `001` sorts *after*
-   `0009` (compare character by character: `001` vs `0007` → `1` > `0`;
-   `001` vs `0010` → `001` is a prefix, so it sorts first). That gives
-   `0007, 0008, 0009, 001, 0010, …, 0019` — so `supabase db reset` on a
+2. **File order is not numeric order.** Migrations are applied in
+   lexicographic filename order, and `001_initial_schema.sql` sorts **last**
+   — after every one of `0007`–`0019`. Two separate reasons, both from
+   byte-wise comparison:
+   - vs `0007`/`0008`/`0009`: they differ at the third character, where
+     `1` (0x31) > `0` (0x30).
+   - vs `0010`–`0019`: the first three characters are identical (`001`), so
+     the comparison lands on the fourth, where `_` (0x5F) outranks every
+     digit `0`–`9` (0x30–0x39).
+
+   Effective order: `0007, 0008, …, 0019, 001`. So `supabase db reset` on a
    FRESH stack will try to create `withdrawals` (which references
-   `auth_api_keys`) before `001_initial_schema.sql` has created
-   `auth_api_keys`, and stop with `relation "auth_api_keys" does not
-   exist`. Confirm with `supabase migration list` before trusting a reset.
+   `auth_api_keys`) first and stop immediately with
+   `relation "auth_api_keys" does not exist` — `001_initial_schema.sql`,
+   the file that creates `auth_api_keys`, never gets a chance to run.
+   Confirm with `supabase migration list` before trusting a reset.
 
    Renaming `001_initial_schema.sql` → `0001_…` would fix the ordering, but
    the version string is what production's `supabase_migrations` history

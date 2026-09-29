@@ -951,6 +951,25 @@ outstanding is deploying it and watching the first few live runs.
 
 ## Task D1 — enable branch protection on main requiring the 'test' check
 
+1. **Turn on branch protection for `main`**: GitHub → the repo → Settings →
+   Branches → *Add branch protection rule* → branch name pattern `main`.
+   Enable **Require a pull request before merging** and **Require status
+   checks to pass before merging**, then search the status-check list for
+   `test` (the job name in `.github/workflows`) and select it. Tick
+   **Require branches to be up to date before merging** so the check runs
+   against the merge result, not a stale commit.
+
+2. **Why this is not optional.** The CI workflow already runs lint + the
+   unit suite + gitleaks on every PR, but without this rule nothing stops a
+   red PR — or a direct push to `main` — from landing. `main stays
+   deployable` is a plan-level constraint (`global-constraints.md`); this
+   rule is the only thing that enforces it mechanically.
+
+3. **Verify**: open a throwaway PR that deliberately breaks a test (e.g.
+   flip an assertion in `__tests__/utils/config.test.js`), confirm GitHub
+   blocks the merge button with "Required statuses must pass", then close
+   the PR without merging.
+
 ## Task D2 — run the integration suite
 
 The money-path integration suite (`__tests__/integration/`) exists and is
@@ -979,10 +998,13 @@ real database.
    ```
 
 3. **Do not use `supabase db reset` on a fresh stack without checking the
-   order first.** The CLI sorts migrations lexicographically by their
-   numeric prefix, and `001` sorts *after* `0009`, so a reset tries to
-   create `withdrawals` before `auth_api_keys` exists and stops with
-   `relation "auth_api_keys" does not exist`. Verify with
+   order first.** Migrations are applied in lexicographic filename order,
+   and `001_initial_schema.sql` sorts **last** — after all of `0007`–`0019`
+   (it beats `0007`–`0009` on the third character, `1` > `0`; and it beats
+   `0010`–`0019` on the fourth, where `_` at 0x5F outranks every digit).
+   So a reset tries to create `withdrawals` first, before `auth_api_keys`
+   exists, and stops with `relation "auth_api_keys" does not exist` —
+   the file that creates `auth_api_keys` never runs. Verify with
    `supabase migration list`. `docs/testing.md` gives the explicit ordered
    `psql` apply that sidesteps the question. **Do not rename
    `001_initial_schema.sql`** to fix the sort — production's migration

@@ -9,6 +9,7 @@ import {
 import { triggerPayoutForWithdrawal } from '../withdrawals/withdrawals.js';
 import { postWithdrawalReceipt, postJournal } from '../../repos/ledger.js';
 import { recordUnmatched } from '../../repos/unmatched-transfers.js';
+import { hasProcessedSignature } from '../../repos/reconciliation.js';
 import { logger } from '../../utils/logger.js';
 
 /**
@@ -67,6 +68,36 @@ export async function handleHeliusEvent(events) {
             { from_wallet: fromWallet, amount: amountMinorUnits, signature: ev.signature },
             '[Helius] No matching open withdrawal'
           );
+        }
+
+        // Already accounted for? Then this delivery is a SECOND notification
+        // of one on-chain transfer, not orphaned money. The common case is a
+        // manual POST /:id/confirm winning the pending_deposit -> received
+        // CAS for this exact signature: `findPendingByWalletAndAmount`
+        // returns nothing (the row is no longer open) even though the
+        // transfer was fully credited, and booking it to suspense would
+        // double-debit `treasury_usdc` — corrupting C1's balance proof and
+        // raising a phantom suspense item over money that already settled.
+        // `hasProcessedSignature` also covers `unmatched_transfers` itself,
+        // so a replayed delivery of an already-booked orphan now short-
+        // circuits here instead of relying on the unique(signature) upsert
+        // to no-op — same outcome, one fewer write.
+        //
+        // A throw is swallowed as "not processed": the fail-safe direction is
+        // to BOOK (inbound USDC must never be silently dropped), and this
+        // check must not introduce a new way for the webhook to 500.
+        let alreadyProcessed = false;
+        try {
+          alreadyProcessed = await hasProcessedSignature(ev.signature);
+        } catch (e) {
+          logger.error(`[Helius] hasProcessedSignature failed for sig=${ev.signature}, booking anyway: ${e.message}`);
+        }
+        if (alreadyProcessed) {
+          logger.info(
+            { signature: ev.signature },
+            '[Helius] transfer already processed via manual confirm, skipping'
+          );
+          continue;
         }
 
         const { data: booked, error: recordErr } = await recordUnmatched({
