@@ -641,3 +641,30 @@ steps to actually apply and verify them against production.
    `suspense_in` journal posts, the admin endpoint
    (`GET /v1/admin/unmatched-transfers`) lists it, and the runbook's
    verification queries return the expected balances after resolving it.
+
+## Task B7 — apply 0018
+
+1. **Apply the idempotency-keys migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0018_idempotency_keys.sql
+   ```
+
+2. **Confirm the table exists:**
+
+   ```sql
+   select table_name from information_schema.tables
+     where table_name = 'idempotency_keys';
+   -- Expected: 1 row
+   ```
+
+3. **Document the client contract** in kola-docs (D4): clients send
+   `Idempotency-Key: <uuid>` on `POST /v1/deposits` and
+   `POST /v1/withdrawals`; a replay with the same key and body returns the
+   original response, the same key with a different body returns `422`,
+   and a key still in flight returns `409` with `Retry-After: 2`.
+
+4. **Wire the >24h cleanup into C1's cron** when that task lands — this
+   task only creates the table; nothing currently prunes old rows.
