@@ -2,9 +2,14 @@ import { jest } from '@jest/globals';
 import BigNumber from 'bignumber.js';
 
 const rpc = jest.fn();
+const loggerError = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/supabase.js', () => ({
   createSupabaseClient: () => ({ rpc })
+}));
+
+jest.unstable_mockModule('../../src/utils/logger.js', () => ({
+  logger: { error: loggerError, warn: jest.fn(), info: jest.fn(), child: () => ({ error: loggerError, warn: jest.fn(), info: jest.fn() }) }
 }));
 
 const {
@@ -113,7 +118,6 @@ test('withdrawal receipt (zero fee, gross == net) omits the fee_income_sle entry
 });
 
 test('withdrawal receipt (gross absent, pre-0015 row) posts ONLY the balanced USDC pair and logs a backfill notice', async () => {
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   await postWithdrawalReceipt({ id: 'w2', amount_usdc: 5_000_000, amount_sle: 12_375, amount_sle_gross: null });
   expect(rpc).toHaveBeenCalledWith('post_journal', {
     p_kind: 'withdrawal_receipt', p_resource_type: 'withdrawal', p_resource_id: 'w2',
@@ -124,8 +128,10 @@ test('withdrawal receipt (gross absent, pre-0015 row) posts ONLY the balanced US
     ]
   });
   assertBalancedPerCurrency(rpc.mock.calls[0][1].p_entries);
-  expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('w2'));
-  errorSpy.mockRestore();
+  expect(loggerError).toHaveBeenCalledWith(
+    { alert: true },
+    expect.stringContaining('w2')
+  );
 });
 
 test('withdrawal payout posts a balanced SLE journal exactly once', async () => {
@@ -143,18 +149,14 @@ test('withdrawal payout posts a balanced SLE journal exactly once', async () => 
 
 test('a posting failure (rpc rejects) does not throw out of the helper', async () => {
   rpc.mockRejectedValueOnce(new Error('connection reset'));
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   await expect(postDepositPayout({ id: 'd3', amount_usdc: 1_000_000 })).resolves.toBeUndefined();
-  expect(errorSpy).toHaveBeenCalled();
-  errorSpy.mockRestore();
+  expect(loggerError).toHaveBeenCalled();
 });
 
 test('a posting failure ({error} from rpc) does not throw out of the helper', async () => {
   rpc.mockResolvedValueOnce({ data: null, error: new Error('unbalanced journal') });
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   await expect(postWithdrawalPayout({ id: 'w4', amount_sle: 100 })).resolves.toBeUndefined();
-  expect(errorSpy).toHaveBeenCalled();
-  errorSpy.mockRestore();
+  expect(loggerError).toHaveBeenCalled();
 });
 
 describe('calculateSleAmount', () => {

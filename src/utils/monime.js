@@ -2,6 +2,7 @@
 
 import { createHmac, timingSafeEqual } from 'crypto';
 import { createMonimeError } from './errors.js';
+import { logger } from './logger.js';
 
 const BASE_URL = 'https://api.monime.io';
 
@@ -45,8 +46,11 @@ async function monimeRequest(method, path, body, idempotencyKey) {
   const data = await response.json();
 
   if (!response.ok) {
-    // Log everything Monime gave us so we can debug field-shape issues
-    console.error(`[Monime] ${method} ${path} → ${response.status}:`, JSON.stringify(data));
+    // Log everything Monime gave us so we can debug field-shape issues.
+    // Structured (not string-concatenated) so the logger's redaction can
+    // strip phone_number/wallet_address if Monime echoes them back in an
+    // error payload (e.g. a rejected payout destination).
+    logger.error({ status: response.status, path, method, response: data }, '[Monime] request failed');
     // Surface as much detail as possible
     const detail =
       (Array.isArray(data.messages) && data.messages.join(', ')) ||

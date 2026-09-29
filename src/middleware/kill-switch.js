@@ -1,5 +1,7 @@
 //@ts-check
 
+import { errorEnvelope } from '../utils/errors.js';
+
 /**
  * Global money pause. Set KOLA_PAUSE=1 in Vercel env + redeploy (or use
  * an env-group flip) to halt all state-changing traffic during an incident.
@@ -10,7 +12,10 @@
 export async function killSwitch(c, next) {
   if (process.env.KOLA_PAUSE === '1') {
     c.header('Retry-After', '300');
-    return c.json({ error: 'Service temporarily paused for maintenance' }, 503);
+    return c.json(
+      errorEnvelope('ServiceUnavailable', 'Service temporarily paused for maintenance', c.get('requestId')),
+      503
+    );
   }
   await next();
 }

@@ -2,6 +2,8 @@
 
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
+import { errorEnvelope } from '../utils/errors.js';
+import { logger } from '../utils/logger.js';
 
 /** @type {import('@upstash/redis').Redis | null} */
 let redis = null;
@@ -22,7 +24,7 @@ function getRedis() {
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) {
     if (!warnedMissingEnv) {
-      console.warn('[RateLimit] UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN not set — rate limiting disabled (fail-open)');
+      logger.warn('[RateLimit] UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN not set — rate limiting disabled (fail-open)');
       warnedMissingEnv = true;
     }
     return null;
@@ -73,10 +75,11 @@ export async function rateLimit(c, next) {
     c.header('X-RateLimit-Reset', String(Math.ceil(reset / 1000)));
     if (!success) {
       c.header('Retry-After', String(Math.max(1, Math.ceil((reset - Date.now()) / 1000))));
-      return c.json({ error: 'Rate limit exceeded' }, 429);
+      return c.json(errorEnvelope('RateLimited', 'Rate limit exceeded', c.get('requestId')), 429);
     }
   } catch (e) {
-    console.error(`[RateLimit] fail-open: ${e.message}`);
+    const log = c.get('log') || logger;
+    log.error(`[RateLimit] fail-open: ${e.message}`);
   }
 
   await next();

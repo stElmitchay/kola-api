@@ -25,6 +25,10 @@ test('POST /v1/wallets/derive returns 410 Gone', async () => {
 
   expect(res.status).toBe(410);
   expect(await res.json()).toEqual({
-    error: 'Derived wallets are discontinued. Supply walletAddress on deposit.'
+    error: {
+      code: 'Gone',
+      message: 'Derived wallets are discontinued. Supply walletAddress on deposit.',
+      request_id: null
+    }
   });
 });

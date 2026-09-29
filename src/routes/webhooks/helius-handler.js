@@ -9,6 +9,7 @@ import {
 import { triggerPayoutForWithdrawal } from '../withdrawals/withdrawals.js';
 import { postWithdrawalReceipt, postJournal } from '../../repos/ledger.js';
 import { recordUnmatched } from '../../repos/unmatched-transfers.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * Process a batch of Helius Enhanced Webhook events. For every USDC token
@@ -56,9 +57,15 @@ export async function handleHeliusEvent(events) {
       if (findErr || !w) {
         const reason = findErr ? 'lookup_error' : 'no_open_match';
         if (findErr) {
-          console.error(`[Helius] Lookup failed for from=${fromWallet} amount=${amountMinorUnits}: ${findErr.message}`);
+          logger.error(
+            { from_wallet: fromWallet, amount: amountMinorUnits },
+            `[Helius] Lookup failed: ${findErr.message}`
+          );
         } else {
-          console.log(`[Helius] No matching open withdrawal for from=${fromWallet} amount=${amountMinorUnits} sig=${ev.signature}`);
+          logger.info(
+            { from_wallet: fromWallet, amount: amountMinorUnits, signature: ev.signature },
+            '[Helius] No matching open withdrawal'
+          );
         }
 
         const { data: booked, error: recordErr } = await recordUnmatched({
@@ -66,7 +73,7 @@ export async function handleHeliusEvent(events) {
           amount_usdc: amountMinorUnits, reason
         });
         if (recordErr) {
-          console.error(`[Helius] Failed to record unmatched transfer sig=${ev.signature}: ${recordErr.message}`);
+          logger.error(`[Helius] Failed to record unmatched transfer sig=${ev.signature}: ${recordErr.message}`);
           continue;
         }
         if (booked) {   // unique(signature) makes replays no-ops
@@ -78,7 +85,7 @@ export async function handleHeliusEvent(events) {
               { account: 'suspense_usdc', direction: 'credit', amount: amountMinorUnits }
             ]
           });
-          console.error(`[Helius] UNMATCHED transfer booked to suspense sig=${ev.signature}`); // C4: paged alert
+          logger.error({ alert: true }, `[Helius] UNMATCHED transfer booked to suspense sig=${ev.signature}`);
         }
         continue;
       }
@@ -89,22 +96,22 @@ export async function handleHeliusEvent(events) {
         { status: 'received', solana_tx_signature: ev.signature }
       );
       if (claimErr) {
-        console.error(`[Helius] CAS failed for withdrawal ${w.id}: ${claimErr.message}`);
+        logger.error(`[Helius] CAS failed for withdrawal ${w.id}: ${claimErr.message}`);
         continue;
       }
       if (!claimed) {
-        console.log(`[Helius] Withdrawal ${w.id} already advanced past pending_deposit, skipping`);
+        logger.info(`[Helius] Withdrawal ${w.id} already advanced past pending_deposit, skipping`);
         continue;
       }
 
-      console.log(`[Helius] Claimed withdrawal ${w.id} via tx ${ev.signature}; triggering payout`);
+      logger.info(`[Helius] Claimed withdrawal ${w.id} via tx ${ev.signature}; triggering payout`);
       await postWithdrawalReceipt(claimed);
       try {
         await triggerPayoutForWithdrawal(claimed);
-        console.log(`[Helius] Withdrawal ${w.id} payout initiated`);
+        logger.info(`[Helius] Withdrawal ${w.id} payout initiated`);
       } catch (e) {
         // triggerPayoutForWithdrawal has already written status=failed; just log.
-        console.error(`[Helius] Withdrawal ${w.id} payout failed: ${e.message}`);
+        logger.error(`[Helius] Withdrawal ${w.id} payout failed: ${e.message}`);
       }
     }
   }

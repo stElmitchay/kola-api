@@ -7,6 +7,8 @@ import {
   getRecentTreasurySignatures, hasProcessedSignature, getParsedTransfersForSignature,
   getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys
 } from '../../repos/reconciliation.js';
+import { errorEnvelope } from '../../utils/errors.js';
+import { logger } from '../../utils/logger.js';
 
 // Balance proof tolerance: USDC (unlike SOL, which pays gas) never moves on
 // its own — any non-zero difference between the on-chain treasury ATA
@@ -19,7 +21,7 @@ const app = new Hono();
 
 app.post('/', async (c) => {
   if (!verifyCronAuth(c)) {
-    return c.json({ error: 'unauthorized' }, 401);
+    return c.json(errorEnvelope('Unauthorized', 'unauthorized', c.get('requestId')), 401);
   }
   const results = await runReconcile();
   return c.json(results);
@@ -50,7 +52,7 @@ export async function sweepMissedEvents() {
     replayed.push(signature);
   }
   if (replayed.length > 0) {
-    console.error(`[Reconcile] ALERT: replayed ${replayed.length} missed signature(s): ${replayed.join(', ')}`);
+    logger.error({ alert: true }, `[Reconcile] ALERT: replayed ${replayed.length} missed signature(s): ${replayed.join(', ')}`);
   }
   return { checked: signatures.length, replayed };
 }
@@ -70,7 +72,7 @@ export async function proveBalance() {
   const diff = onchain > ledger ? onchain - ledger : ledger - onchain;
   const mismatch = diff > BALANCE_TOLERANCE_MINOR;
   if (mismatch) {
-    console.error(`[Reconcile] ALERT: RECONCILIATION_MISMATCH onchain=${onchain} ledger=${ledger}`);
+    logger.error({ alert: true }, `[Reconcile] ALERT: RECONCILIATION_MISMATCH onchain=${onchain} ledger=${ledger}`);
   }
   return { onchain: onchain.toString(), ledger: ledger.toString(), mismatch };
 }
@@ -86,7 +88,8 @@ export async function sweepStuckRows() {
   const thresholdMinutes = Number(process.env.STUCK_THRESHOLD_MINUTES) || DEFAULT_STUCK_THRESHOLD_MINUTES;
   const stale = await listStaleInflight(thresholdMinutes);
   for (const row of stale) {
-    console.error(
+    logger.error(
+      { alert: true },
       `[Reconcile] ALERT: STUCK ${row.id} table=${row.table} status=${row.status} age_minutes=${row.age_minutes}`
     );
   }
@@ -124,7 +127,7 @@ export async function runReconcile() {
     try {
       results[name] = { ok: true, result: await pass() };
     } catch (e) {
-      console.error(`[Reconcile] ALERT: pass ${name} threw and was skipped: ${e.message}`);
+      logger.error({ alert: true }, `[Reconcile] ALERT: pass ${name} threw and was skipped: ${e.message}`);
       results[name] = { ok: false, error: e.message };
     }
   }

@@ -5,6 +5,7 @@ import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { getConnection } from '../utils/connection.js';
 import { getTreasuryAddress } from '../utils/solana.js';
 import { createSupabaseClient } from '../utils/supabase.js';
+import { logger } from '../utils/logger.js';
 
 const supabase = createSupabaseClient();
 
@@ -208,7 +209,7 @@ export async function listStaleInflight(thresholdMinutes) {
       .in('status', statuses)
       .lt('updated_at', cutoffIso);
     if (error) {
-      console.error(`[Reconcile] ALERT: listStaleInflight query failed for ${table}: ${error.message}`);
+      logger.error({ alert: true }, `[Reconcile] ALERT: listStaleInflight query failed for ${table}: ${error.message}`);
       continue;
     }
     for (const row of data || []) {
@@ -233,7 +234,7 @@ export async function deleteExpiredIdempotencyKeys() {
     .delete({ count: 'exact' })
     .lt('created_at', cutoffIso);
   if (error) {
-    console.error(`[Reconcile] ALERT: deleteExpiredIdempotencyKeys failed: ${error.message}`);
+    logger.error({ alert: true }, `[Reconcile] ALERT: deleteExpiredIdempotencyKeys failed: ${error.message}`);
     return 0;
   }
   return count || 0;

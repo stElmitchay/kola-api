@@ -18,6 +18,8 @@ class MockRatelimit {
 }
 
 const fromEnvMock = jest.fn(() => ({ mock: 'redis-client' }));
+const loggerWarn = jest.fn();
+const loggerError = jest.fn();
 
 jest.unstable_mockModule('@upstash/ratelimit', () => ({
   Ratelimit: MockRatelimit
@@ -25,6 +27,15 @@ jest.unstable_mockModule('@upstash/ratelimit', () => ({
 
 jest.unstable_mockModule('@upstash/redis', () => ({
   Redis: { fromEnv: fromEnvMock }
+}));
+
+jest.unstable_mockModule('../../src/utils/logger.js', () => ({
+  logger: {
+    warn: loggerWarn,
+    error: loggerError,
+    info: jest.fn(),
+    child: () => ({ warn: loggerWarn, error: loggerError, info: jest.fn() })
+  }
 }));
 
 const { rateLimit } = await import('../../src/middleware/rate-limit.js');
@@ -44,6 +55,8 @@ function buildApp(rateLimitValue) {
 beforeEach(() => {
   limitMock.mockReset();
   fromEnvMock.mockClear();
+  loggerWarn.mockClear();
+  loggerError.mockClear();
 });
 
 describe('with Upstash env configured', () => {
@@ -69,7 +82,9 @@ describe('with Upstash env configured', () => {
     expect(res.headers.get('X-RateLimit-Remaining')).toBe('0');
     expect(res.headers.get('X-RateLimit-Reset')).toBe(String(Math.ceil(reset / 1000)));
     expect(Number(res.headers.get('Retry-After'))).toBeGreaterThanOrEqual(1);
-    expect(await res.json()).toEqual({ error: 'Rate limit exceeded' });
+    expect(await res.json()).toEqual({
+      error: { code: 'RateLimited', message: 'Rate limit exceeded', request_id: null }
+    });
   });
 
   test('(b) allowed → passes through with headers set', async () => {
@@ -86,18 +101,15 @@ describe('with Upstash env configured', () => {
     expect(res.headers.get('X-RateLimit-Reset')).toBe(String(Math.ceil(reset / 1000)));
   });
 
-  test('(c) limiter throws → passes through (fail-open) and logs via console.error', async () => {
+  test('(c) limiter throws → passes through (fail-open) and logs via logger.error', async () => {
     limitMock.mockRejectedValue(new Error('ECONNREFUSED'));
-    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const app = buildApp(60);
     const res = await app.request('/x');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(errorSpy).toHaveBeenCalled();
-
-    errorSpy.mockRestore();
+    expect(loggerError).toHaveBeenCalled();
   });
 });
 
@@ -115,16 +127,12 @@ describe('without Upstash env configured', () => {
   });
 
   test('(d) missing UPSTASH env → passes through with warn, no throw on import', async () => {
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-
     const app = buildApp(60);
     const res = await app.request('/x');
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(limitMock).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalled();
-
-    warnSpy.mockRestore();
+    expect(loggerWarn).toHaveBeenCalled();
   });
 });
