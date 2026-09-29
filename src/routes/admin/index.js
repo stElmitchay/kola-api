@@ -8,11 +8,27 @@ import { setExchangeRate, getExchangeRates } from './exchange-rates.js';
 import { setExchangeRateSchema } from '../../schemas/exchange-rate.js';
 import { listDeposits } from '../../repos/deposits.js';
 import { listUnmatched } from '../../repos/unmatched-transfers.js';
+import { getActiveRate } from '../../repos/exchange-rates.js';
+import { writeAudit } from '../../repos/audit-log.js';
 
 const app = new Hono();
 
 app.use('/*', adminAuth);
 app.onError(errorHandler);
+
+/**
+ * First hop of X-Forwarded-For, or null. Best-effort — this API sits
+ * behind Vercel's edge, which sets this header itself.
+ * @param {import('hono').Context} c
+ */
+const clientIp = (c) => c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || null;
+
+/**
+ * writeAudit never throws by contract, but the call site guards it anyway
+ * (C2): an audit write must never fail the admin action it describes.
+ * @param {Parameters<typeof writeAudit>[0]} entry
+ */
+const audit = (entry) => writeAudit(entry).catch(() => {});
 
 // --- API Keys ---
 
@@ -26,6 +42,17 @@ app.post('/api-keys', async (c) => {
     expiresAt: body.expiresAt,
     permissions: body.permissions,
     rateLimit: body.rateLimit
+  });
+
+  const { key_hash: _keyHash, ...recordSansHash } = result.record || {};
+
+  await audit({
+    actor: c.get('adminActor'),
+    action: 'api_key.create',
+    resourceType: 'api_key',
+    resourceId: result.record?.id,
+    after: recordSansHash,
+    ip: clientIp(c)
   });
 
   return c.json({
@@ -42,7 +69,18 @@ app.get('/api-keys', async (c) => {
 
 app.delete('/api-keys/:id', async (c) => {
   const id = c.req.param('id');
-  await deactivateApiKey(id);
+  const deactivated = await deactivateApiKey(id);
+
+  await audit({
+    actor: c.get('adminActor'),
+    action: 'api_key.deactivate',
+    resourceType: 'api_key',
+    resourceId: id,
+    before: { id, name: deactivated?.name, is_active: true },
+    after: { is_active: false },
+    ip: clientIp(c)
+  });
+
   return c.json({ message: 'API key deactivated' });
 });
 
@@ -57,7 +95,19 @@ app.put('/exchange-rates', async (c) => {
     return c.json({ error: 'X-Application-Id header is required' }, 400);
   }
 
-  const rate = await setExchangeRate(applicationId, parsed.rate, parsed.setBy, { force: parsed.force });
+  const actor = c.get('adminActor');
+  const { data: previousRate } = await getActiveRate(applicationId);
+  const rate = await setExchangeRate(applicationId, parsed.rate, actor, { force: parsed.force });
+
+  await audit({
+    actor,
+    action: 'rate.set',
+    resourceType: 'exchange_rate',
+    resourceId: applicationId,
+    before: { rate: previousRate ? previousRate.rate : null },
+    after: { rate: rate.rate },
+    ip: clientIp(c)
+  });
 
   return c.json({
     message: 'Exchange rate updated',
