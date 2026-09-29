@@ -9,6 +9,10 @@ import { logger } from './logger.js';
  * back in the Authorization header on every callback. We compare it in
  * constant time against the env-configured expected value.
  *
+ * See docs/fixtures/helius/AUTH.md (V-D) for why a static bearer — rather
+ * than a signed/HMAC'd webhook — is an acceptable posture here, and for the
+ * pending dashboard check on whether the current plan supports signing.
+ *
  * @param {string} headerValue
  * @returns {boolean}
  */
