@@ -14,36 +14,38 @@ export async function getActiveRate(application) {
     .select('*')
     .eq('application', application)
     .eq('active', true)
-    .single();
+    .maybeSingle();          // never turn "0 or 2 rows" into an outage-shaped error
 
   return { data, error };
 }
 
 /**
- * Set a new exchange rate (deactivates the previous one)
+ * Atomically deactivate the old rate and insert the new one (single tx in
+ * Postgres — F6). The partial unique index makes "two active rates"
+ * impossible even under concurrent calls.
  * @param {string} application
  * @param {number} rate - SLE per 1 USDC
  * @param {string} setBy
  */
 export async function setRate(application, rate, setBy) {
-  await supabase
-    .from('exchange_rates')
-    .update({ active: false })
-    .eq('application', application)
-    .eq('active', true);
-
-  const { data, error } = await supabase
-    .from('exchange_rates')
-    .insert({
-      application,
-      rate,
-      set_by: setBy,
-      active: true
-    })
-    .select()
-    .single();
-
+  const { data, error } = await supabase.rpc('set_exchange_rate', {
+    p_application: application, p_rate: rate, p_set_by: setBy
+  });
   return { data, error };
+}
+
+/**
+ * Reject a rate that is too old to price real money against.
+ * @param {{ rate: string|number, created_at: string }} rateRow
+ */
+export function assertRateFresh(rateRow) {
+  const maxAgeMinutes = parseInt(process.env.RATE_MAX_AGE_MINUTES || '1440', 10);
+  const ageMs = Date.now() - new Date(rateRow.created_at).getTime();
+  if (ageMs > maxAgeMinutes * 60_000) {
+    const err = new Error('Exchange rate is stale. An operator must set a fresh rate.');
+    err.name = 'ValidationError';
+    throw err;
+  }
 }
 
 /**

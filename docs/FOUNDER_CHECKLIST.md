@@ -114,3 +114,40 @@ steps to actually apply and verify them against production.
 
    Expected: one row. A second `UPDATE ... SET solana_tx_signature = '<same value>'`
    on a different deposit row should then fail with a unique-violation.
+
+## Task A6 — apply migration 0011
+
+1. **Apply the exchange-rate guards migration** (partial unique index +
+   `set_exchange_rate` function, atomic active-rate switch — F6):
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0011_exchange_rate_guards.sql
+   ```
+
+2. **Confirm the unique index exists:**
+
+   ```sql
+   select indexname from pg_indexes
+     where tablename = 'exchange_rates' and indexname = 'uq_exchange_rates_one_active';
+   ```
+
+   Expected: one row. If any application currently has more than one
+   `active = true` row (shouldn't happen, but the old code path wasn't
+   atomic), the `CREATE UNIQUE INDEX` will fail — deactivate the extra
+   rows first, then re-run.
+
+3. **Confirm the grants landed** (only the service role should be able to
+   call the function; anon/authenticated must not):
+
+   ```sql
+   select has_function_privilege('anon', 'set_exchange_rate(uuid, numeric, text)', 'execute');
+   -- Expected: false
+   ```
+
+4. **Set the new env vars** (`RATE_MAX_AGE_MINUTES`, `RATE_MAX_MOVE_BPS` —
+   see `.env.example`) in Vercel for every environment before this
+   deploys; the code falls back to 1440 / 500 if unset, but an explicit
+   value avoids surprise operator friction on the first rate change
+   after go-live.

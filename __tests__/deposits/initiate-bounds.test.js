@@ -3,7 +3,9 @@ import { jest } from '@jest/globals';
 const getActiveRate = jest.fn();
 const getTreasuryUsdcBalanceMinor = jest.fn();
 
-jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({ getActiveRate }));
+jest.unstable_mockModule('../../src/repos/exchange-rates.js', () => ({
+  getActiveRate, assertRateFresh: jest.fn()
+}));
 jest.unstable_mockModule('../../src/utils/solana.js', () => ({
   deriveWalletFromPhone: jest.fn(),
   getTreasuryUsdcBalanceMinor
@@ -30,7 +32,7 @@ const base = {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.DEPOSIT_MAX_SLE = '500000';        // 5,000.00 SLE
-  getActiveRate.mockResolvedValue({ data: { rate: '25' }, error: null });
+  getActiveRate.mockResolvedValue({ data: { rate: '25', created_at: new Date().toISOString() }, error: null });
 });
 
 test('rejects a deposit above DEPOSIT_MAX_SLE', async () => {

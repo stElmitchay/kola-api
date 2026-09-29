@@ -10,7 +10,7 @@ import {
   listDeposits as listDepositsRepo,
   updateDeposit
 } from '../../repos/deposits.js';
-import { getActiveRate } from '../../repos/exchange-rates.js';
+import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
 import { getWalletByPhone, createWallet } from '../../repos/wallets.js';
 import {
   createValidationError,
@@ -33,7 +33,7 @@ function envInt(name, fallback) {
  * Calculate USDC amount from SLE amount and exchange rate
  * USDC has 6 decimal places, so 1 USDC = 1_000_000 minor units
  * @param {number} amountSleMinor - SLE amount in minor units (cents)
- * @param {number} rate - SLE per 1 USDC (e.g., 25 means 25 SLE = 1 USDC)
+ * @param {BigNumber} rate - SLE per 1 USDC (e.g., 25 means 25 SLE = 1 USDC)
  */
 function calculateUsdcAmount(amountSleMinor, rate) {
   const sleAmount = new BigNumber(amountSleMinor).dividedBy(100);
@@ -93,6 +93,7 @@ export async function initiateDeposit(params) {
   if (rateError || !rateData) {
     throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
   }
+  assertRateFresh(rateData);
 
   const maxSle = envInt('DEPOSIT_MAX_SLE', 500_000);        // 5,000.00 SLE default
   const minSle = envInt('DEPOSIT_MIN_SLE', 100);            // 1.00 SLE default
@@ -103,7 +104,7 @@ export async function initiateDeposit(params) {
     throw createValidationError(`Amount below minimum (${minSle} minor units)`);
   }
 
-  const rate = Number(rateData.rate);
+  const rate = new BigNumber(rateData.rate);
   const amountUsdc = calculateUsdcAmount(params.amount, rate);
 
   if (amountUsdc <= 0) {
@@ -130,7 +131,7 @@ export async function initiateDeposit(params) {
     wallet_type: wallet.type,
     amount_sle: params.amount,
     amount_usdc: amountUsdc,
-    exchange_rate: rate,
+    exchange_rate: rateData.rate,
     payment_method: params.paymentMethod,
     metadata: params.metadata || {}
   });
