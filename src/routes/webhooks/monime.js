@@ -3,7 +3,7 @@
 import { Hono } from 'hono';
 import { verifyWebhookSignature } from '../../utils/monime.js';
 import { transferUsdc } from '../../utils/solana.js';
-import { getDepositById, updateDeposit } from '../../repos/deposits.js';
+import { getDepositById, updateDepositIfStatus } from '../../repos/deposits.js';
 import {
   getWithdrawalById,
   getWithdrawalByMonimePayoutId,
@@ -78,7 +78,7 @@ async function handleDepositEvent(c, eventName, reference) {
   if (successEvents.includes(eventName)) {
     await handleDepositSuccess(deposit);
   } else if (expiryEvents.includes(eventName)) {
-    await updateDeposit(deposit.id, { status: 'expired' });
+    await updateDepositIfStatus(deposit.id, 'pending', { status: 'expired' });
     console.log(`[Webhook] Deposit ${deposit.id} marked as expired`);
   }
 
@@ -131,33 +131,35 @@ async function handlePayoutEvent(c, eventName, data) {
 }
 
 /**
- * Handle a successful deposit — transfer USDC to the user's wallet
+ * Handle a successful deposit — transfer USDC to the user's wallet.
+ * CAS pending → processing is the claim: exactly one delivery of this
+ * event (original, retry, or duplicate event name) wins the claim; every
+ * other delivery sees data=null and returns without touching the chain.
+ * Exported for tests.
  * @param {object} deposit
  */
-async function handleDepositSuccess(deposit) {
+export async function handleDepositSuccess(deposit) {
+  const { data: claimed, error: claimErr } = await updateDepositIfStatus(
+    deposit.id, 'pending', { status: 'processing' }
+  );
+  if (claimErr) {
+    console.error(`[Webhook] Deposit ${deposit.id} claim failed: ${claimErr.message}`);
+    return;
+  }
+  if (!claimed) {
+    console.log(`[Webhook] Deposit ${deposit.id} already claimed, skipping`);
+    return;
+  }
+
   try {
-    await updateDeposit(deposit.id, { status: 'confirmed' });
-    console.log(`[Webhook] Deposit ${deposit.id} confirmed, initiating USDC transfer`);
-
-    await updateDeposit(deposit.id, { status: 'processing' });
-
-    const txSignature = await transferUsdc(
-      deposit.wallet_address,
-      deposit.amount_usdc
-    );
-
-    await updateDeposit(deposit.id, {
-      status: 'completed',
-      solana_tx_signature: txSignature
+    const txSignature = await transferUsdc(claimed.wallet_address, claimed.amount_usdc);
+    await updateDepositIfStatus(deposit.id, 'processing', {
+      status: 'completed', solana_tx_signature: txSignature
     });
-
-    console.log(`[Webhook] Deposit ${deposit.id} completed. Tx: ${txSignature}`);
   } catch (error) {
-    console.error(`[Webhook] USDC transfer failed for deposit ${deposit.id}:`, error.message);
-
-    await updateDeposit(deposit.id, {
-      status: 'failed',
-      failure_reason: error.message
+    console.error(`[Webhook] USDC transfer failed for deposit ${deposit.id}: ${error.message}`);
+    await updateDepositIfStatus(deposit.id, 'processing', {
+      status: 'failed', failure_reason: error.message
     });
   }
 }

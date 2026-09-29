@@ -111,3 +111,23 @@ export async function updateDeposit(id, updates) {
 
   return { data, error };
 }
+
+/**
+ * Compare-and-swap update: only writes if the row is still in expectedStatus.
+ * Returns data=null (no error) when another writer already advanced the row —
+ * the losing webhook retry/duplicate must treat that as "someone else owns it".
+ * @param {string} id
+ * @param {string} expectedStatus
+ * @param {object} updates
+ */
+export async function updateDepositIfStatus(id, expectedStatus, updates) {
+  const { data, error } = await supabase
+    .from('deposits')
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('status', expectedStatus)
+    .select()
+    .maybeSingle();
+
+  return { data, error };
+}

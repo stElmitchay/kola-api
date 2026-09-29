@@ -94,3 +94,23 @@ steps to actually apply and verify them against production.
    git add supabase/schema_baseline_2026-09.sql supabase/migrations/README.md
    git commit -m "chore: capture production schema baseline, document migration gap 0002-0006"
    ```
+
+## Task A3 — apply migration 0010
+
+1. **Apply the deposit guards migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0010_deposit_guards.sql
+   ```
+
+2. **Confirm the unique index exists and rejects a duplicate signature:**
+
+   ```sql
+   select indexname from pg_indexes
+     where tablename = 'deposits' and indexname = 'uq_deposits_solana_tx';
+   ```
+
+   Expected: one row. A second `UPDATE ... SET solana_tx_signature = '<same value>'`
+   on a different deposit row should then fail with a unique-violation.
