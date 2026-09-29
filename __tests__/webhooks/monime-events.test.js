@@ -9,6 +9,8 @@ const updateDepositIfStatus = jest.fn();
 const enqueueTransfer = jest.fn();
 const sweepOpenJobs = jest.fn();
 const waitUntil = jest.fn();
+const postDepositCollection = jest.fn();
+const postWithdrawalPayout = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/webhook-events.js', () => ({ recordWebhookEvent }));
 jest.unstable_mockModule('../../src/repos/deposits.js', () => ({
@@ -25,6 +27,10 @@ jest.unstable_mockModule('../../src/routes/internal/transfer-tick.js', () => ({
   sweepOpenJobs, DEFAULT_SWEEP_LIMIT: 20, processJob: jest.fn(), default: {}
 }));
 jest.unstable_mockModule('@vercel/functions', () => ({ waitUntil }));
+// B4: deposit_collection posts inside handleDepositSuccess, withdrawal_payout
+// posts inside the payout.completed branch — mocked so this suite stays a
+// pure test of the webhook routing/dedup logic.
+jest.unstable_mockModule('../../src/repos/ledger.js', () => ({ postDepositCollection, postWithdrawalPayout }));
 
 const { default: app } = await import('../../src/routes/webhooks/monime.js');
 

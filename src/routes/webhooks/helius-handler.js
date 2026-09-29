@@ -6,6 +6,7 @@ import {
   updateWithdrawalIfStatus
 } from '../../repos/withdrawals.js';
 import { triggerPayoutForWithdrawal } from '../withdrawals/withdrawals.js';
+import { postWithdrawalReceipt } from '../../repos/ledger.js';
 
 /**
  * Process a batch of Helius Enhanced Webhook events. For every USDC token
@@ -68,6 +69,7 @@ export async function handleHeliusEvent(events) {
       }
 
       console.log(`[Helius] Claimed withdrawal ${w.id} via tx ${ev.signature}; triggering payout`);
+      await postWithdrawalReceipt(claimed);
       try {
         await triggerPayoutForWithdrawal(claimed);
         console.log(`[Helius] Withdrawal ${w.id} payout initiated`);

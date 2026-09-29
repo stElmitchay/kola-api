@@ -22,6 +22,7 @@ const sendSerializedTransaction = jest.fn();
 const getCurrentBlockHeight = jest.fn();
 
 const updateDepositIfStatus = jest.fn();
+const postDepositPayout = jest.fn();
 
 jest.unstable_mockModule('../../src/repos/transfer-jobs.js', () => ({
   listOpenJobs, recordSignature, markSent, markFailedPermanent, bumpAttempt
@@ -34,6 +35,10 @@ jest.unstable_mockModule('../../src/repos/deposits.js', () => ({
   getDepositById: jest.fn(), createDeposit: jest.fn(),
   getDeposit: jest.fn(), listDeposits: jest.fn(), updateDeposit: jest.fn()
 }));
+// B4: postDepositPayout posts inside finish() — mocked here so this suite
+// stays a pure unit test of the transfer-tick worker; postings.test.js owns
+// the assertions on the ledger helper's own behavior.
+jest.unstable_mockModule('../../src/repos/ledger.js', () => ({ postDepositPayout }));
 
 const { processJob, sweepOpenJobs, default: app } = await import('../../src/routes/internal/transfer-tick.js');
 
@@ -75,6 +80,8 @@ describe('recovery rule — the point of the pipeline (F9)', () => {
     expect(updateDepositIfStatus).toHaveBeenCalledWith('d1', 'processing', {
       status: 'completed', solana_tx_signature: 'SIG'
     });
+    // B4: finish() posts the deposit_payout journal after the CAS write.
+    expect(postDepositPayout).toHaveBeenCalledWith({ id: 'd1', amount_usdc: 5_000_000 });
   });
 
   test('a sending job whose blockhash expired (beyond the margin) and signature never landed is re-signed exactly once', async () => {
