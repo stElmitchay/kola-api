@@ -1,0 +1,198 @@
+import { jest } from '@jest/globals';
+
+// TEST-CODE-BINDING note: the brief's sample scaffolding names its mocks
+// `getLedgerBalance` and `getParsedTransfersForSignature`; the ruling's
+// actual repo function set (src/repos/reconciliation.js) is
+// `getLedgerTreasuryBalanceMinor` + `getParsedTransfersForSignature` (the
+// latter matches verbatim). Plumbing is adapted to the real names; the
+// three binding assertions (missed-signature replay, mismatch alert
+// wording, STUCK <id> alert wording) are unchanged.
+
+const getRecentTreasurySignatures = jest.fn();
+const hasProcessedSignature = jest.fn();
+const getParsedTransfersForSignature = jest.fn();
+const getLedgerTreasuryBalanceMinor = jest.fn();
+const listStaleInflight = jest.fn();
+const deleteExpiredIdempotencyKeys = jest.fn();
+
+const getTreasuryUsdcBalanceMinor = jest.fn();
+const handleHeliusEvent = jest.fn();
+
+jest.unstable_mockModule('../../src/repos/reconciliation.js', () => ({
+  getRecentTreasurySignatures, hasProcessedSignature, getParsedTransfersForSignature,
+  getLedgerTreasuryBalanceMinor, listStaleInflight, deleteExpiredIdempotencyKeys
+}));
+jest.unstable_mockModule('../../src/utils/solana.js', () => ({
+  getTreasuryUsdcBalanceMinor
+}));
+jest.unstable_mockModule('../../src/routes/webhooks/helius-handler.js', () => ({
+  handleHeliusEvent
+}));
+
+const {
+  runReconcile, sweepMissedEvents, proveBalance, sweepStuckRows, cleanupIdempotencyKeys,
+  default: app
+} = await import('../../src/routes/internal/reconcile-tick.js');
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  // Sensible no-op defaults so a test only overriding the mock it cares
+  // about doesn't also have to defend the other three passes.
+  getRecentTreasurySignatures.mockResolvedValue([]);
+  hasProcessedSignature.mockResolvedValue(true);
+  getParsedTransfersForSignature.mockResolvedValue([]);
+  getTreasuryUsdcBalanceMinor.mockResolvedValue(0n);
+  getLedgerTreasuryBalanceMinor.mockResolvedValue(0n);
+  listStaleInflight.mockResolvedValue([]);
+  deleteExpiredIdempotencyKeys.mockResolvedValue(0);
+  handleHeliusEvent.mockResolvedValue({ ok: true });
+});
+
+describe('pass 1 — missed-event sweep', () => {
+  test('a treasury signature never seen by webhooks is replayed through handleHeliusEvent', async () => {
+    getRecentTreasurySignatures.mockResolvedValue(['SIG-MISSED']);
+    hasProcessedSignature.mockResolvedValue(false); // not in deposits, withdrawals, or unmatched
+    getParsedTransfersForSignature.mockResolvedValue([{
+      signature: 'SIG-MISSED',
+      tokenTransfers: [{ mint: 'USDC_MINT', toUserAccount: 'TREASURY', fromUserAccount: 'SENDER',
+        rawTokenAmount: { tokenAmount: '5000000', decimals: 6 } }]
+    }]);
+
+    await runReconcile();
+
+    expect(handleHeliusEvent).toHaveBeenCalledWith([expect.objectContaining({ signature: 'SIG-MISSED' })]);
+  });
+
+  test('an already-processed signature is skipped without fetching or replaying', async () => {
+    getRecentTreasurySignatures.mockResolvedValue(['SIG-KNOWN']);
+    hasProcessedSignature.mockResolvedValue(true);
+
+    await sweepMissedEvents();
+
+    expect(getParsedTransfersForSignature).not.toHaveBeenCalled();
+    expect(handleHeliusEvent).not.toHaveBeenCalled();
+  });
+
+  test('a signature that adapts to no matching transfer is skipped without replaying', async () => {
+    getRecentTreasurySignatures.mockResolvedValue(['SIG-EMPTY']);
+    hasProcessedSignature.mockResolvedValue(false);
+    getParsedTransfersForSignature.mockResolvedValue([]); // no matching USDC transfer found
+
+    await sweepMissedEvents();
+
+    expect(handleHeliusEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('pass 2 — balance proof', () => {
+  test('ledger treasury balance vs on-chain mismatch beyond tolerance raises an alert log', async () => {
+    getTreasuryUsdcBalanceMinor.mockResolvedValue(90_000_000n);
+    getLedgerTreasuryBalanceMinor.mockResolvedValue(100_000_000n); // 10 USDC hole
+    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runReconcile();
+
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('RECONCILIATION_MISMATCH'));
+    alertSpy.mockRestore();
+  });
+
+  test('a matching balance raises no alert', async () => {
+    getTreasuryUsdcBalanceMinor.mockResolvedValue(42_000_000n);
+    getLedgerTreasuryBalanceMinor.mockResolvedValue(42_000_000n);
+    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await proveBalance();
+
+    expect(result.mismatch).toBe(false);
+    expect(alertSpy.mock.calls.some((c) => String(c[0]).includes('RECONCILIATION_MISMATCH'))).toBe(false);
+    alertSpy.mockRestore();
+  });
+});
+
+describe('pass 3 — stuck-state sweep', () => {
+  test('stale in-flight rows are surfaced (processing > 30 min)', async () => {
+    listStaleInflight.mockResolvedValue([{ table: 'withdrawals', id: 'w-9', status: 'processing', age_minutes: 45 }]);
+    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runReconcile();
+
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('STUCK w-9'));
+    alertSpy.mockRestore();
+  });
+
+  test('defaults the threshold to 30 minutes when STUCK_THRESHOLD_MINUTES is unset', async () => {
+    delete process.env.STUCK_THRESHOLD_MINUTES;
+
+    await sweepStuckRows();
+
+    expect(listStaleInflight).toHaveBeenCalledWith(30);
+  });
+
+  test('honors STUCK_THRESHOLD_MINUTES when set', async () => {
+    process.env.STUCK_THRESHOLD_MINUTES = '15';
+
+    await sweepStuckRows();
+
+    expect(listStaleInflight).toHaveBeenCalledWith(15);
+    delete process.env.STUCK_THRESHOLD_MINUTES;
+  });
+});
+
+describe('pass 4 — housekeeping', () => {
+  test('deletes expired idempotency keys and reports the count', async () => {
+    deleteExpiredIdempotencyKeys.mockResolvedValue(7);
+
+    const result = await cleanupIdempotencyKeys();
+
+    expect(deleteExpiredIdempotencyKeys).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ deleted: 7 });
+  });
+});
+
+describe('pass isolation', () => {
+  test('the first pass throwing does not stop the remaining three from running', async () => {
+    getRecentTreasurySignatures.mockRejectedValue(new Error('RPC unreachable'));
+    const alertSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const results = await runReconcile();
+
+    expect(results.sweepMissedEvents).toEqual({ ok: false, error: 'RPC unreachable' });
+    // The remaining three passes still ran despite pass 1 throwing.
+    expect(getTreasuryUsdcBalanceMinor).toHaveBeenCalledTimes(1);
+    expect(listStaleInflight).toHaveBeenCalledTimes(1);
+    expect(deleteExpiredIdempotencyKeys).toHaveBeenCalledTimes(1);
+    expect(results.proveBalance.ok).toBe(true);
+    expect(results.sweepStuckRows.ok).toBe(true);
+    expect(results.cleanupIdempotencyKeys.ok).toBe(true);
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('pass sweepMissedEvents threw'));
+    alertSpy.mockRestore();
+  });
+});
+
+describe('cron auth on POST /', () => {
+  const OLD_SECRET = process.env.CRON_SECRET;
+  beforeEach(() => { process.env.CRON_SECRET = 'test-cron-secret'; });
+  afterAll(() => { process.env.CRON_SECRET = OLD_SECRET; });
+
+  test('accepts X-Cron-Secret and returns a per-pass summary', async () => {
+    const res = await app.request('/', {
+      method: 'POST',
+      headers: { 'X-Cron-Secret': 'test-cron-secret' }
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty('sweepMissedEvents');
+    expect(body).toHaveProperty('proveBalance');
+    expect(body).toHaveProperty('sweepStuckRows');
+    expect(body).toHaveProperty('cleanupIdempotencyKeys');
+  });
+
+  test('rejects a wrong or missing secret', async () => {
+    const res = await app.request('/', { method: 'POST', headers: { 'X-Cron-Secret': 'wrong' } });
+    expect(res.status).toBe(401);
+    expect(getRecentTreasurySignatures).not.toHaveBeenCalled();
+
+    const res2 = await app.request('/', { method: 'POST' });
+    expect(res2.status).toBe(401);
+  });
+});
