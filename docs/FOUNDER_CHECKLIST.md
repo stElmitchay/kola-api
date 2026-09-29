@@ -1042,3 +1042,120 @@ real database.
    already recorded on a withdrawal or deposit — `hasProcessedSignature()`
    in `src/repos/reconciliation.js` is exactly that query — before booking
    to suspense.
+
+## Launch gate — run in this order
+
+Everything above is the per-task detail. This section sequences all of it
+into one ordered path from "code is done" to "safe to take real traffic."
+Each line cross-references the task section above (or a doc under
+`docs/`) rather than repeating its content — follow the link for the exact
+commands.
+
+1. **Provision Supabase Pro + the PITR add-on**, if not already on it.
+   Required for the DB restore game day (below) and for
+   `docs/runbooks/db-restore.md` to be usable at all during a real
+   incident — this is a launch blocker, not a nice-to-have, because you
+   cannot provision it fast enough during an actual incident.
+
+2. **Apply migrations 0009–0019, in order, on a scratch/local project
+   first** — never the first apply of a new migration straight to
+   production. Use the scratch stack from **Task D2** (`supabase start` +
+   the explicit ordered `psql` apply in `docs/testing.md`, which also
+   documents why `supabase db reset` alone is unsafe here) to prove each
+   migration applies cleanly and the app boots against it. Only once that's
+   green, apply the same chain to production in the same order, following
+   each migration's own apply/verify steps above: **Task A1** (0009),
+   **Task A3** (0010), **Task A6** (0011), **Task B1** (0012), **Task B2**
+   (0013), **Task B3** (0014), **Task B4** (0015), **Task B5** (0016),
+   **Task B6** (0017), **Task B7** (0018), **Task C2** (0019).
+
+3. **Task A2** — dump the real production schema baseline and diff it
+   against what the migration chain produces; reconcile any drift from the
+   undocumented `0002`–`0006` gap into a new migration if load-bearing.
+
+4. **Rotations** — **Task A1** step 6 (Supabase JWT secret,
+   `ADMIN_SECRET_KEY`, Monime access token) and **Task C2** step 3
+   (`ADMIN_KEYS`, one named key per operator). Use
+   `docs/runbooks/rotate-secrets.md` for the exact per-secret procedure —
+   it covers every secret in `.env.example`, not just this launch's
+   required set. Record every rotation in
+   `docs/incidents/2026-09-open-db-review.md`'s rotation table.
+
+5. **Fixture captures** — **Task B2** step 1 (Monime: `checkout_session.
+   completed`, `payment_code.completed`/`processed`, `payout.completed`,
+   `payout.failed`) and **Task B6** step 3 (Helius: one real Enhanced
+   Webhook body). Both feed directly into verifying the `ASSUMPTION(V-A)`
+   / `ASSUMPTION(V-D-adjacent)` field-path markers in
+   `src/routes/webhooks/monime.js` and `src/routes/webhooks/helius-handler.js`
+   — **the fixture wins** if it disagrees with the code.
+
+6. **Task C3** — provision Upstash Redis via the Vercel Marketplace and set
+   `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`. Rate limiting
+   fails open until this is done, so it's safe to launch without it, but
+   don't leave it unset indefinitely.
+
+7. **Set every environment variable** `.env.example` documents, across
+   Vercel production AND preview. The REQUIRED set
+   (`src/utils/config.js`'s `REQUIRED_VARS`) fails the deploy outright if
+   missing (**Task C4** step 1); the rest change behavior silently if left
+   at their defaults, so set them deliberately rather than by omission:
+   - `RATE_MAX_AGE_MINUTES` / `RATE_MAX_MOVE_BPS` (**Task A6** step 4)
+   - `CRON_SECRET` (**Task B3** step 3, shared with **Task C1**)
+   - `ADMIN_KEYS` (**Task C2** step 3)
+   - `STUCK_THRESHOLD_MINUTES` (**Task C1** step 1)
+   - `SENTRY_DSN` (**Task C4** step 2 — optional but recommended)
+   - `SOLANA_RPC_FALLBACK_URL` (**Task C5** step 1 — optional but
+     recommended; also confirm the Helius dashboard HMAC check per step 4)
+   - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (item 6 above)
+   - `MONIME_BASE_URL` — leave **unset** in every real environment (it
+     defaults to `https://api.monime.io`). It exists only so the D3 Monime
+     game day can redirect outbound payout calls to a local stand-in
+     server — see `docs/game-days/TEMPLATE-monime-payout-5xx.md`. Confirm
+     it is NOT set in production/preview before going live.
+
+8. **Task C1** — enable the reconcile cron and complete its first-run
+   verification (manual trigger, clean `proveBalance`, a deliberately
+   stuck row, idempotency-key cleanup). This is what makes items 9–12
+   below trustworthy once you're live.
+
+9. **Task B8** — run `scripts/audit-derived-wallets.js` against production
+   and record `TOTAL LOCKED`. If non-zero, follow that task's steps for
+   recording the loss and posting the adjustment journal (requires
+   migration 0015, already applied in item 2) before launch.
+
+10. **Task D2** — run the integration suite (`npm run test:integration`)
+    end to end against the scratch stack from item 2, following
+    `docs/testing.md`. This is the only thing that exercises the advisory
+    locks, CAS claims, state-machine triggers, and ledger balance trigger
+    against a real database — do not skip it because the unit suite is
+    green.
+
+11. **Game days (Task D3)** — run all four templates under
+    `docs/game-days/` against a scratch/devnet environment and rename each
+    with the date once run, per the instructions in each file:
+    - `TEMPLATE-monime-payout-5xx.md`
+    - `TEMPLATE-helius-outage-sweep.md`
+    - `TEMPLATE-kill-switch-drill.md`
+    - `TEMPLATE-db-restore-pitr.md` (needs item 1's PITR add-on)
+
+    File every transcript, timing, and surprise in the renamed copy —
+    these are what `docs/runbooks/monime-outage.md`,
+    `docs/runbooks/stuck-withdrawal.md`, `docs/runbooks/kill-switch.md`,
+    and `docs/runbooks/db-restore.md` assume have actually been rehearsed
+    once before a real incident forces the first run.
+
+12. **Task D1** — enable branch protection on `main` requiring the `test`
+    CI check, and verify it actually blocks a red PR.
+
+13. **Phase E — launch gate checklist.** Once every item above is done and
+    Phase D's exit criteria are met (CI green and required on `main`, both
+    test suites green, all four game-day files on disk with real
+    transcripts, docs deployed without drift), the next gate is Phase E in
+    the plan file itself — external security review, the A1 incident
+    review closed out, a written treasury float policy, the refund path
+    rehearsed on devnet, a rate-ops policy, a closed beta window, and the
+    compliance/KYC decision. This checklist intentionally does not
+    duplicate Phase E's items — see `PRODUCTION_FIX_PLAN.md`'s "Phase E —
+    Launch gate (checklist, not tasks)" section (and
+    `.superpowers/sdd/PRODUCTION_FIX_PLAN/progress.md` for how Phases A–D
+    were tracked) for the authoritative list.

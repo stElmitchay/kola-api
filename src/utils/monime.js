@@ -3,9 +3,20 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { createMonimeError } from './errors.js';
 import { logger } from './logger.js';
-import { envInt } from './config.js';
+import { envInt, envStr } from './config.js';
 
-const BASE_URL = 'https://api.monime.io';
+const DEFAULT_BASE_URL = 'https://api.monime.io';
+
+/**
+ * Monime API base URL. Live-reading (not cached) so game-day drills and
+ * tests can point it at a local stand-in (e.g. a one-liner 500 server) via
+ * `MONIME_BASE_URL` without a restart; production leaves it unset and gets
+ * the real Monime API unchanged.
+ * @returns {string}
+ */
+export function monimeBaseUrl() {
+  return envStr('MONIME_BASE_URL', DEFAULT_BASE_URL);
+}
 
 /**
  * Make an authenticated request to the Monime API
@@ -31,7 +42,7 @@ async function monimeRequest(method, path, body, idempotencyKey) {
 
   let response;
   try {
-    response = await fetch(`${BASE_URL}${path}`, {
+    response = await fetch(`${monimeBaseUrl()}${path}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
