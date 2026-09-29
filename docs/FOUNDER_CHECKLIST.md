@@ -605,3 +605,39 @@ steps to actually apply and verify them against production.
    advisory lock isn't doing its job — stop and re-check that migration 0016
    applied cleanly (step 2, including both locks) before shipping withdrawals
    traffic.
+
+## Task B6 — apply 0017
+
+1. **Apply the unmatched-transfers migration:**
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0017_unmatched_transfers.sql
+   ```
+
+2. **Confirm the table exists:**
+
+   ```sql
+   select table_name from information_schema.tables
+     where table_name = 'unmatched_transfers';
+   -- Expected: 1 row
+   ```
+
+3. **Capture a Helius fixture and verify the amount-parse assumption.**
+   Follow `docs/fixtures/helius/README.md`: trigger one real USDC transfer
+   into the treasury wallet (devnet is fine) and save the verbatim
+   Enhanced Webhook body to `docs/fixtures/helius/transfer.json`. Confirm
+   `rawTokenAmount.tokenAmount` is an integer string in minor units (and
+   that `rawTokenAmount.decimals` is `6`), per the
+   `// ASSUMPTION(V-D-adjacent)` marker in
+   `src/routes/webhooks/helius-handler.js`. **The fixture wins** — fix that
+   line if the live payload disagrees.
+
+4. **Rehearse the suspense runbook once on devnet** before it's needed for
+   real: follow `docs/runbooks/unmatched-transfer.md` end to end against a
+   deliberately-unmatched devnet transfer (send USDC to the devnet
+   treasury from a wallet with no open withdrawal), confirming the
+   `suspense_in` journal posts, the admin endpoint
+   (`GET /v1/admin/unmatched-transfers`) lists it, and the runbook's
+   verification queries return the expected balances after resolving it.
