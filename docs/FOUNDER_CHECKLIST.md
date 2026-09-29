@@ -782,3 +782,60 @@ outstanding is deploying it and watching the first few live runs.
    had >24h to accumulate rows in production traffic (it will read `0` on
    a fresh deploy with no rows old enough yet — that's expected, not a
    failure).
+
+## Task C2 — apply 0019 + set ADMIN_KEYS
+
+1. **Apply the audit-log migration** (requires 0015's `forbid_ledger_mutation()`
+   — already applied under Task B4):
+
+   ```bash
+   supabase db push
+   # or, applied directly against the prod connection string:
+   psql "$SUPABASE_DB_URL" -f supabase/migrations/0019_audit_log.sql
+   ```
+
+2. **Confirm the table and immutability trigger landed:**
+
+   ```sql
+   select table_name from information_schema.tables where table_name = 'audit_log';
+   -- Expected: 1 row
+
+   select trigger_name from information_schema.triggers
+     where event_object_table = 'audit_log';
+   -- Expected: trg_audit_immutable, x2 rows (fires on both UPDATE and DELETE)
+   ```
+
+3. **Set `ADMIN_KEYS`** in Vercel (production + preview) and in local
+   `.env` — one named key per operator, format:
+
+   ```
+   ADMIN_KEYS="mitchel:<long-random-secret>,ops2:<another-long-random-secret>"
+   ```
+
+   Every admin action (API key create/deactivate, exchange rate set) is
+   now attributed to the matching name in `audit_log.actor`, closing the
+   blast-radius gap where all admin traffic was indistinguishable under
+   one shared secret (F14). Generate each secret the same way the old
+   `ADMIN_SECRET_KEY` was generated (long random string, not a password);
+   give each operator their own `name:secret` pair and their own
+   `X-Admin-Key` value — never share one pair across two people.
+
+4. **`ADMIN_SECRET_KEY` is now deprecated** — it is still accepted for one
+   release as a fallback (requests using it are attributed to actor
+   `'legacy'` in `audit_log`), so existing automation keeps working during
+   the migration window. Once every operator/script has a named key in
+   `ADMIN_KEYS`, remove `ADMIN_SECRET_KEY` from Vercel and delete the
+   legacy-key branch in `src/middleware/admin-auth.js`.
+
+5. **Confirm attribution end-to-end**: with a named key set, call
+   `PUT /v1/admin/exchange-rates` (or any admin mutation) and check the
+   latest `audit_log` row — `actor` should be the key's name (not
+   `'legacy'`), and `before`/`after` should hold the previous/new rate
+   with no key hashes or raw keys anywhere in the row.
+
+6. **`setBy` in the exchange-rate request body is now ignored.** The
+   schema still accepts it for wire-compat with existing clients, but the
+   authenticated admin key's name is what gets written to
+   `exchange_rates.set_by` and to `audit_log.actor`. No client change is
+   required immediately, but `setBy` can be dropped from future client
+   requests — it does nothing.

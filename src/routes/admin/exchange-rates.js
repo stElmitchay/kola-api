@@ -13,12 +13,17 @@ import { createDatabaseError, createValidationError } from '../../utils/errors.j
  * RATE_MAX_MOVE_BPS off the current active rate unless opts.force is set —
  * a fat-fingered rate is the single highest-blast-radius mistake an
  * operator can make (F25).
+ *
+ * `actor` is the authenticated admin key's name (`c.get('adminActor')`),
+ * not the request body's `setBy` field — `setBy` is deprecated (C2): the
+ * route ignores it in favour of the authenticated actor, which is what
+ * gets written to `exchange_rates.set_by` and to the audit log.
  * @param {string} application
  * @param {number} rate - SLE per 1 USDC
- * @param {string} setBy
+ * @param {string} actor - authenticated admin key name
  * @param {{ force?: boolean }} [opts]
  */
-export async function setExchangeRate(application, rate, setBy, opts = {}) {
+export async function setExchangeRate(application, rate, actor, opts = {}) {
   if (rate <= 0) {
     throw createValidationError('Rate must be a positive number');
   }
@@ -37,7 +42,7 @@ export async function setExchangeRate(application, rate, setBy, opts = {}) {
     }
   }
 
-  const { data, error } = await setRateRepo(application, rate, setBy);
+  const { data, error } = await setRateRepo(application, rate, actor);
 
   if (error) {
     throw createDatabaseError(`Failed to set exchange rate: ${error.message}`);
