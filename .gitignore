@@ -17,3 +17,4 @@ docs/*
 !docs/decisions/**
 .DS_Store
 .vercel
+!docs/PRELAUNCH_LOG.md
