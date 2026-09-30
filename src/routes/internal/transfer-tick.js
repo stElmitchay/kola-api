@@ -20,7 +20,9 @@ const EXPIRY_MARGIN_SLOTS = 32;
 export const DEFAULT_SWEEP_LIMIT = 20;
 const app = new Hono();
 
-app.post('/', async (c) => {
+// GET + POST: Vercel's native cron scheduler sends GET; external
+// schedulers and manual triggers send POST. Same auth, same sweep.
+app.on(['GET', 'POST'], '/', async (c) => {
   if (!verifyCronAuth(c)) {
     return c.json(errorEnvelope('Unauthorized', 'unauthorized', c.get('requestId')), 401);
   }

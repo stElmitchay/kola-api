@@ -216,7 +216,7 @@ describe('pass isolation', () => {
   });
 });
 
-describe('cron auth on POST /', () => {
+describe('cron auth on GET/POST /', () => {
   const OLD_SECRET = process.env.CRON_SECRET;
   beforeEach(() => { process.env.CRON_SECRET = 'test-cron-secret'; });
   afterAll(() => { process.env.CRON_SECRET = OLD_SECRET; });
@@ -233,6 +233,21 @@ describe('cron auth on POST /', () => {
     expect(body).toHaveProperty('sweepStuckRows');
     expect(body).toHaveProperty('cleanupIdempotencyKeys');
     expect(body).toHaveProperty('sweepMissingJournals');
+  });
+
+  test('accepts GET with Authorization bearer (Vercel native cron)', async () => {
+    const res = await app.request('/', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer test-cron-secret' }
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty('sweepMissedEvents');
+  });
+
+  test('rejects unauthenticated GET', async () => {
+    const res = await app.request('/', { method: 'GET' });
+    expect(res.status).toBe(401);
   });
 
   test('rejects a wrong or missing secret', async () => {
