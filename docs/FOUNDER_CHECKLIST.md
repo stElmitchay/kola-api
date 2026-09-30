@@ -1215,6 +1215,6 @@ commands.
     rehearsed on devnet, a rate-ops policy, a closed beta window, and the
     compliance/KYC decision. This checklist intentionally does not
     duplicate Phase E's items — see `PRODUCTION_FIX_PLAN.md`'s "Phase E —
-    Launch gate (checklist, not tasks)" section (and
-    `.superpowers/sdd/PRODUCTION_FIX_PLAN/progress.md` for how Phases A–D
-    were tracked) for the authoritative list.
+    Launch gate (checklist, not tasks)" section for the authoritative
+    list (Phases A–D's execution record lives in the git history of
+    `feature/production-hardening`).

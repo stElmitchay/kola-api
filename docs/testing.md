@@ -230,18 +230,15 @@ and the two concurrency proofs:
 
   Suspense bookkeeping is asserted rather than assumed: when the manual
   confirm wins the `pending_deposit → received` CAS, the losing Helius
-  delivery no longer finds an open withdrawal for `(wallet, amount)` and
-  books the transfer to `unmatched_transfers` + a `suspense_in` journal
-  (0017/F11 — it never drops inbound USDC it cannot match). Those rows are
-  expected, and the spec requires every one of them to be a *duplicate*
-  booking of already-credited money: its signature must belong to a
-  withdrawal now in `processing`. **This is a real operational defect worth
-  a follow-up**: a Helius delivery for a transfer the manual confirm
-  already accounted for raises a phantom suspense item for an operator to
-  chase. A fix would be for the no-match path to check whether the
-  signature is already recorded on a withdrawal/deposit (the
-  `hasProcessedSignature` query already exists in
-  `src/repos/reconciliation.js`) before booking to suspense.
+  delivery no longer finds an open withdrawal for `(wallet, amount)`.
+  The no-match path consults `hasProcessedSignature()` (see
+  `src/routes/webhooks/helius-handler.js`) before booking, so a transfer
+  the manual confirm already accounted for is skipped with an info log —
+  no phantom `unmatched_transfers` row, no duplicate `suspense_in`
+  journal. The fuzz asserts this strictly: after all 50 rounds,
+  `unmatched_transfers` must be empty. Genuinely unmatched inbound USDC
+  (wrong wallet, wrong amount, expired) still books to suspense
+  (0017/F11 — inbound USDC is never dropped).
 
 **`deposit-fuzz.test.js`** — 50 distinct success deliveries for ONE deposit
 fired at once (distinct `event.id`s, so the exactly-once gate lets all 50
