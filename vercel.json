@@ -10,7 +10,7 @@
     }
   ],
   "crons": [
-    { "path": "/api/internal/transfer-tick", "schedule": "* * * * *" },
-    { "path": "/api/internal/reconcile-tick", "schedule": "*/5 * * * *" }
+    { "path": "/api/internal/transfer-tick", "schedule": "0 3 * * *" },
+    { "path": "/api/internal/reconcile-tick", "schedule": "30 3 * * *" }
   ]
 }
