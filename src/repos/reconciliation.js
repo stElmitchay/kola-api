@@ -3,6 +3,7 @@
 import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { withRpcFailover } from '../utils/connection.js';
+import { envInt } from '../utils/config.js';
 import { getTreasuryAddress } from '../utils/solana.js';
 import { createSupabaseClient } from '../utils/supabase.js';
 import { logger } from '../utils/logger.js';
@@ -32,9 +33,16 @@ async function getTreasuryAta() {
  */
 export async function getRecentTreasurySignatures(limit = 50) {
   const ata = await getTreasuryAta();
+  // Launch watermark: chain events from before RECONCILE_SINCE_UNIX are
+  // pre-launch history and must never be re-imported — the 0021 clean
+  // slate wiped their DB records, so without this filter the sweep would
+  // re-book them into suspense forever. 0 (default) disables the filter.
+  const sinceUnix = envInt('RECONCILE_SINCE_UNIX');
   return withRpcFailover(async (connection) => {
     const sigs = await connection.getSignaturesForAddress(ata, { limit });
-    return (sigs || []).map((s) => s.signature);
+    return (sigs || [])
+      .filter((s) => !sinceUnix || (s.blockTime != null && s.blockTime >= sinceUnix))
+      .map((s) => s.signature);
   });
 }
 
