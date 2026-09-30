@@ -3,6 +3,7 @@
 import { Hono } from 'hono';
 import { getProviders } from '../../utils/monime.js';
 import { getActiveRate } from '../../repos/exchange-rates.js';
+import { errorEnvelope } from '../../utils/errors.js';
 
 const app = new Hono();
 
@@ -19,13 +20,16 @@ app.get('/rate', async (c) => {
   const applicationId = c.req.query('application');
 
   if (!applicationId) {
-    return c.json({ error: 'application query parameter is required' }, 400);
+    return c.json(
+      errorEnvelope('ValidationError', 'application query parameter is required', c.get('requestId')),
+      400
+    );
   }
 
   const { data, error } = await getActiveRate(applicationId);
 
   if (error || !data) {
-    return c.json({ error: 'No active exchange rate found' }, 404);
+    return c.json(errorEnvelope('NotFoundError', 'No active exchange rate found', c.get('requestId')), 404);
   }
 
   return c.json({

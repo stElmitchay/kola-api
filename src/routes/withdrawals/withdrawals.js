@@ -9,49 +9,45 @@ import {
   getWithdrawal as getWithdrawalRepo,
   listWithdrawals as listWithdrawalsRepo,
   updateWithdrawal,
-  updateWithdrawalIfStatus,
-  sumWithdrawalsForPhoneSince,
-  findPendingByWalletAndAmount
+  updateWithdrawalIfStatus
 } from '../../repos/withdrawals.js';
-import { getActiveRate } from '../../repos/exchange-rates.js';
+import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
+import { postWithdrawalReceipt } from '../../repos/ledger.js';
+import { envInt } from '../../utils/config.js';
 import {
   createValidationError,
   createNotFoundError,
   createDatabaseError
 } from '../../utils/errors.js';
 
-const DEFAULT_FEE_BPS = 100;            // 1%
-const DEFAULT_MIN_USDC = 100_000;       // 0.1 USDC
-const DEFAULT_MAX_USDC = 100_000_000;   // 100 USDC
-const DEFAULT_DAILY_CAP_USDC = 500_000_000; // 500 USDC
 const WITHDRAWAL_EXPIRY_MINUTES = 30;
 
-function envInt(name, fallback) {
-  const v = process.env[name];
-  if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 /**
- * Calculate the SLE delivered after the withdrawal fee.
- *   sleMinor = usdcMinor * rate * (10000 - feeBps) / 10000 / 1e6 * 100
+ * Calculate the gross (pre-fee) and net (post-fee) SLE for a withdrawal.
+ *   grossMinor = floor(usdc * rate * 100)
+ *   netMinor   = floor(usdc * rate * (10000 - feeBps) / 10000 * 100)
  *
  * Layout (each variable in *minor units*):
  *   usdcMinor (1 USDC = 1_000_000) -> usdc = usdcMinor / 1e6
- *   sleFloat  = usdc * rate * (1 - fee)
- *   sleMinor  = floor(sleFloat * 100)
+ *   grossSle  = usdc * rate
+ *   netSle    = grossSle * (1 - fee)
+ *
+ * The gross figure is persisted (`amount_sle_gross`) so the ledger can
+ * split the withdrawal fee into its own income account at posting time
+ * (fee = gross - net) without recomputing the exchange-rate math later.
  *
  * @param {number} usdcMinor
- * @param {number} rate - SLE per 1 USDC
+ * @param {BigNumber} rate - SLE per 1 USDC
  * @param {number} feeBps
+ * @returns {{ net: number, gross: number }}
  */
-function calculateSleAmount(usdcMinor, rate, feeBps) {
+export function calculateSleAmount(usdcMinor, rate, feeBps) {
   const usdc = new BigNumber(usdcMinor).dividedBy(1_000_000);
   const grossSle = usdc.multipliedBy(rate);
+  const grossMinor = grossSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
   const netSle = grossSle.multipliedBy(10000 - feeBps).dividedBy(10000);
-  const sleMinor = netSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
-  return sleMinor.toNumber();
+  const netMinor = netSle.multipliedBy(100).integerValue(BigNumber.ROUND_DOWN);
+  return { net: netMinor.toNumber(), gross: grossMinor.toNumber() };
 }
 
 /**
@@ -70,9 +66,9 @@ export async function initiateWithdrawal(params) {
   }
 
   // Limit checks
-  const minUsdc = envInt('WITHDRAWAL_MIN_USDC', DEFAULT_MIN_USDC);
-  const maxUsdc = envInt('WITHDRAWAL_MAX_USDC', DEFAULT_MAX_USDC);
-  const dailyCap = envInt('WITHDRAWAL_DAILY_CAP_USDC', DEFAULT_DAILY_CAP_USDC);
+  const minUsdc = envInt('WITHDRAWAL_MIN_USDC');
+  const maxUsdc = envInt('WITHDRAWAL_MAX_USDC');
+  const dailyCap = envInt('WITHDRAWAL_DAILY_CAP_USDC');
 
   if (params.amountUsdc < minUsdc) {
     throw createValidationError(`Amount below minimum (${minUsdc} minor units / ${(minUsdc / 1_000_000).toFixed(2)} USDC)`);
@@ -81,51 +77,26 @@ export async function initiateWithdrawal(params) {
     throw createValidationError(`Amount exceeds maximum (${maxUsdc} minor units / ${(maxUsdc / 1_000_000).toFixed(2)} USDC)`);
   }
 
-  // Daily rolling cap per phone
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { total, error: capError } = await sumWithdrawalsForPhoneSince(
-    normalized,
-    params.application,
-    since
-  );
-  if (capError) {
-    throw createDatabaseError(`Failed to check daily cap: ${capError.message}`);
-  }
-  if (total + params.amountUsdc > dailyCap) {
-    throw createValidationError(
-      `Daily withdrawal cap of ${(dailyCap / 1_000_000).toFixed(2)} USDC would be exceeded (already used ${(total / 1_000_000).toFixed(2)} USDC in last 24h)`
-    );
-  }
-
   // Rate + fee
   const { data: rateData, error: rateError } = await getActiveRate(params.application);
   if (rateError || !rateData) {
     throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
   }
-  const rate = Number(rateData.rate);
-  const feeBps = envInt('WITHDRAWAL_FEE_BPS', DEFAULT_FEE_BPS);
-  const amountSle = calculateSleAmount(params.amountUsdc, rate, feeBps);
+  assertRateFresh(rateData);
+  const rate = new BigNumber(rateData.rate);
+  const feeBps = envInt('WITHDRAWAL_FEE_BPS');
+  const { net: amountSle, gross: amountSleGross } = calculateSleAmount(params.amountUsdc, rate, feeBps);
 
   if (amountSle <= 0) {
     throw createValidationError('Amount too small to produce any SLE after fee');
   }
 
-  // Refuse a duplicate while one is still open. Keeps the (wallet, amount)
-  // pair unambiguous so the Helius auto-confirm handler can match an incoming
-  // USDC transfer to exactly one withdrawal.
-  const { data: openDup } = await findPendingByWalletAndAmount(
-    params.fromWalletAddress,
-    params.amountUsdc
-  );
-  if (openDup) {
-    throw createValidationError(
-      `An open withdrawal already exists for this wallet and amount ` +
-      `(id: ${openDup.id}). Complete or wait for it to expire before creating another.`
-    );
-  }
-
   const expiresAt = new Date(Date.now() + WITHDRAWAL_EXPIRY_MINUTES * 60 * 1000).toISOString();
 
+  // Daily-cap sum, the (wallet, amount) duplicate-open check, and the insert
+  // itself all run inside create_withdrawal_guarded under a per-phone
+  // advisory lock (migration 0016), so concurrent creates can no longer
+  // both pass either check (F10 — TOCTOU).
   const { data: withdrawal, error: insertError } = await createWithdrawalRepo({
     application: params.application,
     phone_number: normalized,
@@ -133,14 +104,29 @@ export async function initiateWithdrawal(params) {
     provider_code: params.providerCode,
     amount_usdc: params.amountUsdc,
     amount_sle: amountSle,
+    amount_sle_gross: amountSleGross,
     fee_bps: feeBps,
-    exchange_rate: rate,
+    exchange_rate: rateData.rate,
     expires_at: expiresAt,
     metadata: params.metadata || {}
-  });
+  }, dailyCap);
 
   if (insertError || !withdrawal) {
-    throw createDatabaseError(`Failed to create withdrawal: ${insertError?.message}`);
+    const message = insertError?.message || '';
+    const capMatch = message.match(/DAILY_CAP_EXCEEDED used=(\d+)/);
+    if (capMatch) {
+      const used = Number(capMatch[1]);
+      throw createValidationError(
+        `Daily withdrawal cap of ${(dailyCap / 1_000_000).toFixed(2)} USDC would be exceeded (already used ${(used / 1_000_000).toFixed(2)} USDC in last 24h)`
+      );
+    }
+    if (message.includes('DUPLICATE_OPEN_WITHDRAWAL')) {
+      throw createValidationError(
+        'An open withdrawal already exists for this wallet and amount. ' +
+        'Complete it or wait for it to expire, or withdraw a slightly different amount.'
+      );
+    }
+    throw createDatabaseError(`Failed to create withdrawal: ${message}`);
   }
 
   return {
@@ -189,7 +175,9 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
   // Skip expiry + on-chain verification when retrying — we've already done that work
   if (!isPayoutRetry) {
     if (new Date(withdrawal.expires_at).getTime() < Date.now()) {
-      await updateWithdrawal(id, { status: 'expired' });
+      // CAS: only expire a row that is still pending. If Helius claimed it
+      // between our read and now, the claim wins and this confirm is a no-op.
+      await updateWithdrawalIfStatus(id, 'pending_deposit', { status: 'expired' });
       throw createValidationError('Withdrawal has expired');
     }
 
@@ -218,22 +206,24 @@ export async function confirmWithdrawal(id, application, solanaTxSignature) {
       return getWithdrawalStatus(id, application);
     }
     workingRow = claimed;
+
+    await postWithdrawalReceipt(claimed);
   }
 
-  await triggerPayoutForWithdrawal(workingRow);
+  await triggerPayoutForWithdrawal(workingRow, isPayoutRetry ? 'failed' : 'received');
 
   return getWithdrawalStatus(id, application);
 }
 
 /**
- * Fire the Monime payout for a withdrawal whose USDC has been verified on-chain.
- * On success advances the row to 'processing' and records monime_payout_id.
- * On failure writes 'failed' + failure_reason and rethrows so the caller can
- * decide whether to surface the error (manual confirm: yes, webhook: swallow + 200).
- *
+ * Fire the Monime payout for a withdrawal whose USDC has been verified.
+ * All status writes are CAS from expectedStatus so a racing completion
+ * webhook can never be overwritten (F8): if the CAS loses, we keep the
+ * webhook's status and only backfill monime_payout_id for the audit trail.
  * @param {object} withdrawal
+ * @param {string} [expectedStatus] - 'received' normally, 'failed' on the retry path
  */
-export async function triggerPayoutForWithdrawal(withdrawal) {
+export async function triggerPayoutForWithdrawal(withdrawal, expectedStatus = 'received') {
   try {
     const payout = await createPayout({
       withdrawalId: withdrawal.id,
@@ -243,13 +233,16 @@ export async function triggerPayoutForWithdrawal(withdrawal) {
       metadata: { withdrawal_id: withdrawal.id }
     });
 
-    await updateWithdrawal(withdrawal.id, {
+    const { data: advanced } = await updateWithdrawalIfStatus(withdrawal.id, expectedStatus, {
       status: 'processing',
       monime_payout_id: payout.id,
       failure_reason: null
     });
+    if (!advanced) {
+      await updateWithdrawal(withdrawal.id, { monime_payout_id: payout.id });
+    }
   } catch (payoutError) {
-    await updateWithdrawal(withdrawal.id, {
+    await updateWithdrawalIfStatus(withdrawal.id, expectedStatus, {
       status: 'failed',
       failure_reason: `Monime payout failed: ${payoutError.message}`
     });

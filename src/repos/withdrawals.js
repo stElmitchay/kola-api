@@ -5,7 +5,11 @@ import { createSupabaseClient } from '../utils/supabase.js';
 const supabase = createSupabaseClient();
 
 /**
- * Create a new withdrawal record
+ * Create a new withdrawal record via the advisory-locked `create_withdrawal_guarded`
+ * RPC (migration 0016). The daily-cap sum and the (wallet, amount) duplicate-open
+ * check both run inside that function under a per-phone `pg_advisory_xact_lock`,
+ * so two concurrent creates for the same phone can no longer both pass either
+ * check (F10 — TOCTOU).
  * @param {object} withdrawal
  * @param {string} withdrawal.application
  * @param {string} withdrawal.phone_number
@@ -13,20 +17,18 @@ const supabase = createSupabaseClient();
  * @param {string} withdrawal.provider_code
  * @param {number} withdrawal.amount_usdc
  * @param {number} withdrawal.amount_sle
+ * @param {number} [withdrawal.amount_sle_gross]
  * @param {number} withdrawal.fee_bps
  * @param {number} withdrawal.exchange_rate
  * @param {string} withdrawal.expires_at
  * @param {object} [withdrawal.metadata]
+ * @param {number} dailyCapUsdc - rolling 24h cap (minor units) enforced inside the RPC
  */
-export async function createWithdrawal(withdrawal) {
-  const { data, error } = await supabase
-    .from('withdrawals')
-    .insert({
-      ...withdrawal,
-      status: 'pending_deposit'
-    })
-    .select()
-    .single();
+export async function createWithdrawal(withdrawal, dailyCapUsdc) {
+  const { data, error } = await supabase.rpc('create_withdrawal_guarded', {
+    p: withdrawal,
+    p_daily_cap: dailyCapUsdc
+  });
 
   return { data, error };
 }
@@ -175,27 +177,4 @@ export async function updateWithdrawal(id, updates) {
     .single();
 
   return { data, error };
-}
-
-/**
- * Sum amount_usdc for non-failed/expired withdrawals on a phone since a given time.
- * Used to enforce the rolling 24h daily cap.
- * @param {string} phoneNumber
- * @param {string} application
- * @param {string} sinceIso
- * @returns {Promise<{ total: number, error: any }>}
- */
-export async function sumWithdrawalsForPhoneSince(phoneNumber, application, sinceIso) {
-  const { data, error } = await supabase
-    .from('withdrawals')
-    .select('amount_usdc')
-    .eq('phone_number', phoneNumber)
-    .eq('application', application)
-    .gte('created_at', sinceIso)
-    .not('status', 'in', '(failed,expired)');
-
-  if (error) return { total: 0, error };
-
-  const total = (data || []).reduce((sum, row) => sum + Number(row.amount_usdc), 0);
-  return { total, error: null };
 }

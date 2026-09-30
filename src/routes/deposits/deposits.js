@@ -2,7 +2,7 @@
 
 import BigNumber from 'bignumber.js';
 import { validatePhoneNumber } from '../../utils/validation.js';
-import { deriveWalletFromPhone } from '../../utils/solana.js';
+import { getTreasuryUsdcBalanceMinor } from '../../utils/solana.js';
 import { createCheckoutSession, createPaymentCode } from '../../utils/monime.js';
 import {
   createDeposit as createDepositRepo,
@@ -10,8 +10,8 @@ import {
   listDeposits as listDepositsRepo,
   updateDeposit
 } from '../../repos/deposits.js';
-import { getActiveRate } from '../../repos/exchange-rates.js';
-import { getWalletByPhone, createWallet } from '../../repos/wallets.js';
+import { getActiveRate, assertRateFresh } from '../../repos/exchange-rates.js';
+import { envInt } from '../../utils/config.js';
 import {
   createValidationError,
   createNotFoundError,
@@ -22,7 +22,7 @@ import {
  * Calculate USDC amount from SLE amount and exchange rate
  * USDC has 6 decimal places, so 1 USDC = 1_000_000 minor units
  * @param {number} amountSleMinor - SLE amount in minor units (cents)
- * @param {number} rate - SLE per 1 USDC (e.g., 25 means 25 SLE = 1 USDC)
+ * @param {BigNumber} rate - SLE per 1 USDC (e.g., 25 means 25 SLE = 1 USDC)
  */
 function calculateUsdcAmount(amountSleMinor, rate) {
   const sleAmount = new BigNumber(amountSleMinor).dividedBy(100);
@@ -32,31 +32,13 @@ function calculateUsdcAmount(amountSleMinor, rate) {
 }
 
 /**
- * Resolve wallet address — use provided or derive from phone number
- * @param {string | undefined} walletAddress
- * @param {string} phoneNumber
- * @param {string} application
- * @returns {Promise<{ address: string, type: 'provided' | 'derived' }>}
+ * Resolve wallet address — walletAddress is required (F4: derived wallets
+ * have no private key, so USDC sent to them is permanently unspendable).
+ * @param {string} walletAddress
+ * @returns {{ address: string, type: 'provided' }}
  */
-async function resolveWalletAddress(walletAddress, phoneNumber, application) {
-  if (walletAddress) {
-    return { address: walletAddress, type: 'provided' };
-  }
-
-  const { data: existing } = await getWalletByPhone(phoneNumber, application);
-  if (existing) {
-    return { address: existing.wallet_address, type: 'derived' };
-  }
-
-  const { address } = await deriveWalletFromPhone(phoneNumber);
-
-  await createWallet({
-    phone_number: phoneNumber,
-    wallet_address: address,
-    application
-  });
-
-  return { address, type: 'derived' };
+function resolveWalletAddress(walletAddress) {
+  return { address: walletAddress, type: 'provided' };
 }
 
 /**
@@ -66,7 +48,7 @@ async function resolveWalletAddress(walletAddress, phoneNumber, application) {
  * @param {string} params.currency
  * @param {string} params.paymentMethod
  * @param {string} params.phoneNumber
- * @param {string} [params.walletAddress]
+ * @param {string} params.walletAddress
  * @param {string} [params.successUrl]
  * @param {string} [params.cancelUrl]
  * @param {object} [params.metadata]
@@ -82,19 +64,32 @@ export async function initiateDeposit(params) {
   if (rateError || !rateData) {
     throw createValidationError('No active exchange rate configured. Admin must set a rate first.');
   }
+  assertRateFresh(rateData);
 
-  const rate = Number(rateData.rate);
+  const maxSle = envInt('DEPOSIT_MAX_SLE');        // 5,000.00 SLE default
+  const minSle = envInt('DEPOSIT_MIN_SLE');        // 1.00 SLE default
+  if (params.amount > maxSle) {
+    throw createValidationError(`Amount exceeds maximum (${maxSle} minor units)`);
+  }
+  if (params.amount < minSle) {
+    throw createValidationError(`Amount below minimum (${minSle} minor units)`);
+  }
+
+  const rate = new BigNumber(rateData.rate);
   const amountUsdc = calculateUsdcAmount(params.amount, rate);
 
   if (amountUsdc <= 0) {
     throw createValidationError('Amount too small to convert to USDC');
   }
 
-  const wallet = await resolveWalletAddress(
-    params.walletAddress,
-    normalized,
-    params.application
-  );
+  const treasuryBalance = await getTreasuryUsdcBalanceMinor();
+  if (treasuryBalance < BigInt(amountUsdc)) {
+    // Never quote a deposit the treasury cannot settle. Generic message on
+    // purpose: the exact float level is operational information.
+    throw createValidationError('Deposits are temporarily unavailable. Please try again later.');
+  }
+
+  const wallet = resolveWalletAddress(params.walletAddress);
 
   const { data: deposit, error: depositError } = await createDepositRepo({
     application: params.application,
@@ -103,7 +98,7 @@ export async function initiateDeposit(params) {
     wallet_type: wallet.type,
     amount_sle: params.amount,
     amount_usdc: amountUsdc,
-    exchange_rate: rate,
+    exchange_rate: rateData.rate,
     payment_method: params.paymentMethod,
     metadata: params.metadata || {}
   });

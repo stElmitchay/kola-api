@@ -2,27 +2,24 @@
 
 import { Hono } from 'hono';
 import { apiKeyAuth } from '../../middleware/api-key-auth.js';
+import { rateLimit } from '../../middleware/rate-limit.js';
 import { errorHandler } from '../../middleware/error-handler.js';
-import { deriveWalletSchema } from '../../schemas/wallet.js';
-import { deriveWallet, fetchWalletBalance } from './wallets.js';
+import { fetchWalletBalance } from './wallets.js';
+import { errorEnvelope } from '../../utils/errors.js';
 
 const app = new Hono();
 
 app.use('/*', apiKeyAuth);
+app.use('/*', rateLimit);
 app.onError(errorHandler);
 
+// F4: phone-derived addresses have no private key — USDC sent to them is
+// permanently unspendable. Discontinued; see docs/decisions/0001-derived-wallets.md.
 app.post('/derive', async (c) => {
-  const body = await c.req.json();
-  const parsed = deriveWalletSchema.parse(body);
-  const application = c.get('application');
-
-  const result = await deriveWallet(parsed.phoneNumber, application);
-
-  return c.json({
-    walletAddress: result.address,
-    isNew: result.isNew,
-    phoneNumber: parsed.phoneNumber
-  }, result.isNew ? 201 : 200);
+  return c.json(
+    errorEnvelope('Gone', 'Derived wallets are discontinued. Supply walletAddress on deposit.', c.get('requestId')),
+    410
+  );
 });
 
 app.get('/:address/balance', async (c) => {

@@ -2,8 +2,21 @@
 
 import { createHmac, timingSafeEqual } from 'crypto';
 import { createMonimeError } from './errors.js';
+import { logger } from './logger.js';
+import { envInt, envStr } from './config.js';
 
-const BASE_URL = 'https://api.monime.io';
+const DEFAULT_BASE_URL = 'https://api.monime.io';
+
+/**
+ * Monime API base URL. Live-reading (not cached) so game-day drills and
+ * tests can point it at a local stand-in (e.g. a one-liner 500 server) via
+ * `MONIME_BASE_URL` without a restart; production leaves it unset and gets
+ * the real Monime API unchanged.
+ * @returns {string}
+ */
+export function monimeBaseUrl() {
+  return envStr('MONIME_BASE_URL', DEFAULT_BASE_URL);
+}
 
 /**
  * Make an authenticated request to the Monime API
@@ -25,17 +38,26 @@ async function monimeRequest(method, path, body, idempotencyKey) {
     headers['Idempotency-Key'] = idempotencyKey;
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
+  const timeoutMs = envInt('MONIME_TIMEOUT_MS');
+
+  let response;
+  try {
+    response = await fetch(`${monimeBaseUrl()}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw createMonimeError(`Monime request timed out after ${timeoutMs}ms — outcome unknown, do not assume failure`);
+    }
+    throw err;
+  }
 
   const data = await response.json();
 
   if (!response.ok) {
-    // Log everything Monime gave us so we can debug field-shape issues
-    console.error(`[Monime] ${method} ${path} → ${response.status}:`, JSON.stringify(data));
     // Surface as much detail as possible
     const detail =
       (Array.isArray(data.messages) && data.messages.join(', ')) ||
@@ -43,6 +65,15 @@ async function monimeRequest(method, path, body, idempotencyKey) {
       data.error?.message ||
       data.message ||
       JSON.stringify(data);
+    // Deliberately do NOT log the raw vendor `data` object: its shape is
+    // whatever Monime sends back (arbitrary, unversioned), so it can nest
+    // a rejected payout's phone/wallet destination at any depth. The
+    // logger's redact paths only match an exact, fixed depth (verified:
+    // pino/fast-redact wildcards like '*.*.phone_number' match exactly
+    // two levels of nesting, not "at any depth") — they can't reliably
+    // cover a shape we don't control. Log only the derived `detail`
+    // string (error codes/messages) plus request metadata instead.
+    logger.error({ status: response.status, path, method, detail }, '[Monime] request failed');
     throw createMonimeError(`Monime API error ${response.status}: ${detail}`);
   }
 
